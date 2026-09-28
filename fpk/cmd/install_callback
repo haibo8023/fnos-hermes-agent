@@ -88,10 +88,16 @@ ensure_uv() {
             "https://pypi.org/simple/uv/"
         do
             log_msg "querying uv wheel index: ${IDX}"
+            # ⚠️ href 是相对路径（../../packages/...），必须按**当前源**解析。
+            # 历史 bug：统一改写成 mirrors.aliyun.com，导致从清华源拿到的相对路径
+            # 被拼成阿里云的错误地址 → 下载到的不是 zip（HTML/404）→ wheel 方式必然失败
+            # → 退回慢速 GitHub 下载（实测：装 uv 从 ~10 秒变成 ~15 分钟，还常超时失败）。
+            local IDX_BASE="${IDX%/simple/uv/}"
             WHEEL_URL=$(curl -LsSf --connect-timeout 15 --max-time 30 "${IDX}" 2>>"${LOG_FILE}" \
                 | grep -o 'href="[^"]*py3-none-manylinux[^"]*' \
                 | grep "${ARCH}" \
-                | sed 's|^href="../../|https://mirrors.aliyun.com/pypi/|; s|^href="||; s|#sha256=.*||' \
+                | sed 's|^href="||; s|#sha256=.*||' \
+                | sed "s|^\.\./\.\./|${IDX_BASE}/|; s|^\.\./|${IDX_BASE}/|" \
                 | sort -t'-' -k2,2V \
                 | tail -1)
             if [ -n "${WHEEL_URL}" ]; then
@@ -110,25 +116,24 @@ ensure_uv() {
             log_msg "simple index query failed, trying GitHub fallback ..."
         fi
 
-        # wheel 下载失败 → GitHub tar.gz 兜底（ghproxy 中继优先，直连兜底）
+        # wheel 下载失败 → GitHub tar.gz 兜底（多个中继 + 直连依次尝试）
+        # 实测各中继速度差异极大：gh-proxy.com ≈800KB/s，ghproxy.net 经常 0B/s（2026-09-28 实测）
         if [ ! -x "${UV_BIN}/uv" ]; then
             log_msg ">>> wheel 方式失败，尝试 GitHub 下载 ..."
             local UV_TAR="uv-${ARCH}-unknown-linux-gnu"
             local UV_GZ="${TMP_DIR}/uv.tar.gz"
             local UV_GZ_OK=false
-            if curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
-                 -o "${UV_GZ}" "https://ghproxy.net/https://github.com/astral-sh/uv/releases/latest/download/${UV_TAR}.tar.gz" 2>&1 \
-               && tar tzf "${UV_GZ}" >/dev/null 2>&1 \
-               && tar xzf "${UV_GZ}" -C "${UV_BIN}" --strip-components=1 "${UV_TAR}/uv" 2>&1; then
-                UV_GZ_OK=true
-                log_msg "uv extracted from GitHub tarball (ghproxy)"
-            fi
-            if [ "${UV_GZ_OK}" != "true" ] && curl -L --retry 3 --retry-delay 5 --connect-timeout 15 --progress-bar \
-                 -o "${UV_GZ}" "https://github.com/astral-sh/uv/releases/latest/download/${UV_TAR}.tar.gz" 2>&1 \
-               && tar tzf "${UV_GZ}" >/dev/null 2>&1 \
-               && tar xzf "${UV_GZ}" -C "${UV_BIN}" --strip-components=1 "${UV_TAR}/uv" 2>&1; then
-                log_msg "uv extracted from GitHub tarball"
-            fi
+            for _relay in "https://gh-proxy.com/" "https://ghfast.top/" "https://ghproxy.net/" ""; do
+                [ "${UV_GZ_OK}" = "true" ] && break
+                log_msg "download via relay: ${_relay:-direct}"
+                if curl -L --retry 2 --retry-delay 3 --connect-timeout 15 --max-time 420 --progress-bar \
+                     -o "${UV_GZ}" "${_relay}https://github.com/astral-sh/uv/releases/latest/download/${UV_TAR}.tar.gz" 2>&1 \
+                   && tar tzf "${UV_GZ}" >/dev/null 2>&1 \
+                   && tar xzf "${UV_GZ}" -C "${UV_BIN}" --strip-components=1 "${UV_TAR}/uv" 2>&1; then
+                    UV_GZ_OK=true
+                    log_msg "uv extracted from GitHub tarball (${_relay:-direct})"
+                fi
+            done
         fi
 
         rm -rf "${TMP_DIR}"
