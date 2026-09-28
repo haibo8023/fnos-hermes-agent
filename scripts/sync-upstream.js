@@ -45,24 +45,28 @@ function curl(url) {
 
 console.log('═══ 检测上游', UPSTREAM_REPO, '═══');
 
-// ── 获取官方版本（git tag 权威，上游从 2026-09-28 起改用 tag 做版本号）──
-//   上游 tag 格式: v2026.9.24 / v2026.9.21 / ...
-//   旧方案从 pyproject.toml 读 version="0.0.0"（占位符）→ 2026-09-28 导致版本线误切到 0.0.0
+// ── 获取官方版本（GitHub Releases API 权威）──────────────────────
+//   上游 tag 用 calendar-version（v2026.9.24），但真正的 semver 在 Release
+//   name 里（"Hermes Agent v0.21.5 (v2026.9.24)"）。main 分支的 pyproject.toml
+//   在发布后重置为 version="0.0.0" 占位符，不能直接读。
+//   方案：用 Releases API 取 latest release，从 name 解析 semver。
 let LATEST_VER = '';
+let LATEST_TAG = '';
 try {
-  const tagsJson = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=10`);
-  const tags = JSON.parse(tagsJson);
-  // 取最新的 calendar-version tag: vYYYY.M.D 格式
-  for (const t of tags) {
-    const m = t.name.match(/^v(\d{4}\.\d+\.\d+)$/);
-    if (m) { LATEST_VER = m[1]; break; }
-  }
-} catch (e) { console.log('⚠ GitHub Tags API 获取失败:', e.message.slice(0, 80)); }
+  const relJson = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest`);
+  const rel = JSON.parse(relJson);
+  LATEST_TAG = rel.tag_name || '';
+  // Release name 格式: "Hermes Agent v0.21.5 (v2026.9.24)"
+  const nameMatch = (rel.name || '').match(/v(\d+\.\d+\.\d+)/);
+  const bodyMatch = (rel.body || '').match(/v(\d+\.\d+\.\d+)/);
+  LATEST_VER = (nameMatch && nameMatch[1]) || (bodyMatch && bodyMatch[1]) || '';
+  if (LATEST_VER) console.log(`（Release: ${rel.name}）`);
+} catch (e) { console.log('⚠ GitHub Releases API 获取失败:', e.message.slice(0, 80)); }
 if (!LATEST_VER) {
-  console.log('✗ 无法从上游 git tag 获取版本号');
+  console.log('✗ 无法从上游 Release 解析 semver 版本号');
   process.exit(1);
 }
-console.log('官方最新版本:', LATEST_VER);
+console.log('官方最新版本:', LATEST_VER, '(tag:', LATEST_TAG + ')');
 
 // ── 获取上游 main 最新 commit sha ─────────────────────────────────
 let LATEST_SHA = '';
