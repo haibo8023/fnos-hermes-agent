@@ -45,6 +45,46 @@ rm -f "${TRIM_APPDEST}/hermes-agent.sock" 2>/dev/null || true
 rm -f "/var/apps/hermes-agent/target/hermes-agent.sock" 2>/dev/null || true
 log_msg "socket 清理完成"
 
+# ── 清理可重建的缓存和旧回滚备份，减小 rsync 备份体积 ──────────────
+# fnOS 升级前会 rsync 备份整个 @apphome/hermes-agent → 回滚目录。
+# 数据目录里的 .cache（playwright chromium ~400MB、chrome-devtools、node corepack、
+# uv archive 等）和 venv 下的大量小文件会导致 rsync 备份极慢/极大，
+# 可能撑爆 BTRFS 元数据空间 → 触发只读保护 → 升级失败 + 系统存储崩溃（2026-09-28 实测）。
+# 这些缓存都能自动重建，升级前删除是安全的。
+
+TRIM_PKGHOME="${TRIM_PKGHOME:-/vol1/@apphome/hermes-agent}"
+CACHE_DIR="${TRIM_PKGHOME}/data/.cache"
+
+if [ -d "${CACHE_DIR}" ]; then
+    CACHE_SIZE="$(du -sh "${CACHE_DIR}" 2>/dev/null | awk '{print $1}')"
+    log_msg "清理 .cache 目录 (${CACHE_SIZE}): playwright/chrome-devtools/node-corepack/uv-archive"
+
+    # playwright chromium（~400MB，可重新下载）
+    rm -rf "${CACHE_DIR}/ms-playwright" 2>/dev/null || true
+    # chrome-devtools-mcp profile（~200MB，可重建）
+    rm -rf "${CACHE_DIR}/chrome-devtools-mcp" 2>/dev/null || true
+    # node corepack（~50MB，可重新下载）
+    rm -rf "${CACHE_DIR}/node" 2>/dev/null || true
+    # uv archive（pip wheel 缓存，~300MB，可重新下载）
+    rm -rf "${CACHE_DIR}/uv" 2>/dev/null || true
+
+    AFTER_SIZE="$(du -sh "${CACHE_DIR}" 2>/dev/null | awk '{print $1}')"
+    log_msg "清理后 .cache: ${AFTER_SIZE}"
+fi
+
+# 清理旧的升级回滚备份目录（fnOS 不自动清理，积累会占大量空间）
+BACKUP_GLOB="/vol1/@apphome/.appstore-upgrade-rollback-hermes-agent-*"
+BACKUP_COUNT="$(ls -d ${BACKUP_GLOB} 2>/dev/null | wc -l)"
+if [ "${BACKUP_COUNT}" -gt 0 ]; then
+    BACKUP_TOTAL="$(du -shc ${BACKUP_GLOB} 2>/dev/null | tail -1 | awk '{print $1}')"
+    log_msg "清理 ${BACKUP_COUNT} 个旧回滚备份目录 (共 ${BACKUP_TOTAL})"
+    rm -rf ${BACKUP_GLOB} 2>/dev/null || true
+fi
+
+# 清理轮转日志（>5MB 的 .log.* 文件）
+find "${TRIM_PKGHOME}/data" -name "*.log.*" -size +5M -delete 2>/dev/null || true
+log_msg "清理大轮转日志: done"
+
 # 额外等待 2 秒，确保文件系统释放所有句柄
 sleep 2
 

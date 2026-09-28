@@ -46,6 +46,16 @@ rm -f "${TRIM_APPDEST}/hermes-agent.sock" 2>/dev/null || true
 rm -f "/var/apps/hermes-agent/target/hermes-agent.sock" 2>/dev/null || true
 log_msg "socket 清理完成"
 
+# 清理可重建的缓存（同 upgrade_init）
+TRIM_PKGHOME="${TRIM_PKGHOME:-/vol1/@apphome/hermes-agent}"
+CACHE_DIR="${TRIM_PKGHOME}/data/.cache"
+if [ -d "${CACHE_DIR}" ]; then
+    CACHE_SIZE="$(du -sh "${CACHE_DIR}" 2>/dev/null | awk '{print $1}')"
+    log_msg "清理 .cache 目录 (${CACHE_SIZE})"
+    rm -rf "${CACHE_DIR}/ms-playwright" "${CACHE_DIR}/chrome-devtools-mcp" "${CACHE_DIR}/node" "${CACHE_DIR}/uv" 2>/dev/null || true
+fi
+rm -rf /vol1/@apphome/.appstore-upgrade-rollback-hermes-agent-* 2>/dev/null || true
+
 # 端口冲突清理：安装前杀掉占用应用端口（8650 UI / 8742 gateway / 9219 dashboard）的旧 hermes 进程，
 # 避免端口被占导致安装或启动失败（例如残留的独立安装 gateway）
 for PORT in 8650 8742 9219; do
