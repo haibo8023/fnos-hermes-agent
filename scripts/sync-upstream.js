@@ -45,26 +45,21 @@ function curl(url) {
 
 console.log('═══ 检测上游', UPSTREAM_REPO, '═══');
 
-// ── 获取官方版本（pyproject.toml 权威）────────────────────────────
+// ── 获取官方版本（git tag 权威，上游从 2026-09-28 起改用 tag 做版本号）──
+//   上游 tag 格式: v2026.9.24 / v2026.9.21 / ...
+//   旧方案从 pyproject.toml 读 version="0.0.0"（占位符）→ 2026-09-28 导致版本线误切到 0.0.0
 let LATEST_VER = '';
 try {
-  const py = curl(`https://raw.githubusercontent.com/${UPSTREAM_REPO}/main/pyproject.toml`);
-  const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-  LATEST_VER = m ? m[1] : '';
-} catch (e) { console.log('⚠ raw.githubusercontent.com 获取失败:', e.message.slice(0, 80)); }
+  const tagsJson = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=10`);
+  const tags = JSON.parse(tagsJson);
+  // 取最新的 calendar-version tag: vYYYY.M.D 格式
+  for (const t of tags) {
+    const m = t.name.match(/^v(\d{4}\.\d+\.\d+)$/);
+    if (m) { LATEST_VER = m[1]; break; }
+  }
+} catch (e) { console.log('⚠ GitHub Tags API 获取失败:', e.message.slice(0, 80)); }
 if (!LATEST_VER) {
-  // fallback：api.github.com contents API（CI 网络 raw 域名不稳时兜底）
-  try {
-    const py2 = curl(`https://api.github.com/repos/${UPSTREAM_REPO}/contents/pyproject.toml?ref=main`);
-    let content = py2;
-    try { content = Buffer.from(JSON.parse(py2).content || "", "base64").toString("utf8"); } catch {}
-    const m2 = content.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-    LATEST_VER = m2 ? m2[1] : '';
-    if (LATEST_VER) console.log('（经 api.github.com 获取）');
-  } catch (e2) { console.log('⚠ api.github.com 兜底也失败:', e2.message.slice(0, 80)); }
-}
-if (!LATEST_VER) {
-  console.log('✗ 无法获取上游版本（网络受限？尝试 --proxy socks5://127.0.0.1:10808）');
+  console.log('✗ 无法从上游 git tag 获取版本号');
   process.exit(1);
 }
 console.log('官方最新版本:', LATEST_VER);

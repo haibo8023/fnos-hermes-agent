@@ -181,9 +181,11 @@ let latestSha = '';
 let latestVer = '';
 try {
   latestSha = execSync(`git -C "${upstreamDir}" rev-parse HEAD`, { encoding: 'utf8' }).trim().slice(0, 12);
-  const py = fs.readFileSync(path.join(upstreamDir, 'pyproject.toml'), 'utf8');
-  const m = py.match(/^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/m);
-  latestVer = m ? m[1] : '';
+  // 版本号读 VERSION 文件（sync-upstream.js 已用 git tag 更新），不再读 pyproject.toml
+  // （上游 2026-09-28 起 pyproject.toml version="0.0.0" 是占位符）
+  try {
+    latestVer = fs.readFileSync(path.join(__dirname, '..', 'VERSION'), 'utf8').trim().split('.').slice(0, 3).join('.');
+  } catch {}
 } catch {}
 
 // ── 输出报告 ───────────────────────────────────────────────────────
