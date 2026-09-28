@@ -49,9 +49,18 @@ _PEER_SELECT_HEAD = """
                 FROM sessions s
                 LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash
 """
+# A row a *completed handoff* owns stays recoverable whatever end_reason it carries: the source
+# interface's teardown runs AFTER ownership moved to the destination and can stamp a terminal reason
+# (``cli_close``) before the destination's first reply — the row must survive that race or the
+# handed-off leg is orphaned and a fresh empty session is minted in its place. A later DELIBERATE
+# close is still fenced the ordinary way: a reset-boundary row ended after this row's last activity
+# blocks recovery (the NOT EXISTS below). ``pending``/``failed``/NULL handoffs are untouched, so this
+# is strictly "ownership was transferred", never "a handoff was attempted".
+_HANDOFF_OWNED_ROW_SQL = "(s.handoff_state = 'completed')"
 _PEER_BY_KEY_SQL = f"""{_PEER_SELECT_HEAD}                WHERE s.session_key = ?
                   AND s.source = ?
-                  AND (s.ended_at IS NULL OR s.end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))
+                  AND (s.ended_at IS NULL OR s.end_reason IN ({_RECOVERABLE_END_REASONS_SQL})
+                       OR {_HANDOFF_OWNED_ROW_SQL})
                   AND NOT EXISTS (
                       SELECT 1 FROM sessions b
                       WHERE b.session_key = s.session_key
@@ -71,7 +80,8 @@ _PEER_BY_TUPLE_SQL = f"""{_PEER_SELECT_HEAD}                WHERE s.source = ?
                   AND COALESCE(s.chat_type, '') = COALESCE(?, '')
                   AND COALESCE(s.thread_id, '') = COALESCE(?, '')
                   AND (? IS NULL OR COALESCE(s.profile_name, ?) = ?)
-                  AND (s.ended_at IS NULL OR s.end_reason IN ({_RECOVERABLE_END_REASONS_SQL}))
+                  AND (s.ended_at IS NULL OR s.end_reason IN ({_RECOVERABLE_END_REASONS_SQL})
+                       OR {_HANDOFF_OWNED_ROW_SQL})
                   AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
                   ))
@@ -254,11 +264,11 @@ class SessionGatewayMixin:
             if conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone() is None:
                 conn.execute(
                     """INSERT INTO sessions (
-                               id, source, user_id, session_key, chat_id,
+                               id, source, created_source, user_id, session_key, chat_id,
                                chat_type, thread_id, display_name, origin_json,
                                profile_name, transport_profile, started_at
                            )
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(id) DO UPDATE SET
                                session_key = COALESCE(sessions.session_key, excluded.session_key),
                                chat_id = COALESCE(sessions.chat_id, excluded.chat_id),
@@ -266,10 +276,11 @@ class SessionGatewayMixin:
                                thread_id = COALESCE(sessions.thread_id, excluded.thread_id),
                                display_name = COALESCE(sessions.display_name, excluded.display_name),
                                origin_json = COALESCE(sessions.origin_json, excluded.origin_json),
-                               transport_profile = COALESCE(sessions.transport_profile, excluded.transport_profile)""",
+                               transport_profile = COALESCE(sessions.transport_profile, excluded.transport_profile),
+                               created_source = COALESCE(sessions.created_source, excluded.created_source)""",
                     # Same ownership stamp as _insert_session_row: an unowned (NULL) row
                     # vanishes from profile-keyed consumers.
-                    (session_id, source, user_id, session_key, chat_id, chat_type, thread_id, display_name,
+                    (session_id, source, source, user_id, session_key, chat_id, chat_type, thread_id, display_name,
                      origin_json, self._own_profile_name(), transport_profile, time.time()),
                 )
         self._execute_write(_do)
@@ -765,9 +776,9 @@ class SessionGatewayMixin:
     def session_gateway_runtime(session_meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Read the persisted runtime route off a session row dict (``model_config`` as
         JSON string or parsed dict). Precedence: nested ``gateway_runtime`` (gateway sync /
-        CLI ``/model``), then top-level ``provider``/``base_url``/``api_mode`` (TUI), then
-        ``billing_provider`` so sessions that never ran ``/model`` still restore the
-        provider that served them. Empty dict on parse failure — resume uses ambient config."""
+        CLI ``/model``), then top-level ``provider``/``base_url``/``api_mode`` (TUI), with
+        ``billing_provider`` filling a missing provider so sessions that never ran ``/model``
+        still restore the provider that served them. Empty dict on parse failure — resume uses ambient config."""
         from hermes_state import _BARE_BILLING_PROVIDERS
         raw = (session_meta or {}).get("model_config")
         if isinstance(raw, str):
@@ -783,14 +794,14 @@ class SessionGatewayMixin:
         if isinstance(runtime, dict) and runtime.get("provider"):
             return {k: v for k, v in runtime.items() if v is not None}
         top_level = {key: raw.get(key) for key in ("provider", "base_url", "api_mode") if raw.get(key)}
-        if top_level:
-            return top_level
         # billing_provider is COALESCE-written on the first accounted API call — the only durable
         # record for sessions that never ran /model. Bare buckets ("auto"/"custom") are not
         # routable identities; filter them so resume falls back to the ambient default.
         billing_provider = str((session_meta or {}).get("billing_provider") or "").strip()
         if billing_provider and billing_provider.lower() not in _BARE_BILLING_PROVIDERS:
-            return {"provider": billing_provider}
+            top_level.setdefault("provider", billing_provider)
+        if top_level:
+            return top_level
         if not isinstance(runtime, dict):
             return {}
         return {k: v for k, v in runtime.items() if v is not None}
