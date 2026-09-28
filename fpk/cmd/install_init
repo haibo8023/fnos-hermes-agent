@@ -27,13 +27,24 @@ pkill -9 -f "bun.*monitor\.js" 2>/dev/null || true
 pkill -9 -f "hermes.*gateway" 2>/dev/null || true
 pkill -9 -f "hermes.*dashboard" 2>/dev/null || true
 
-# 等待进程完全退出（最多 10 秒），避免文件句柄残留导致 fnOS 权限设置失败
+# ⚠️ 常驻辅助进程（bill-watcher / photo_describer / chat-record-archiver）不在 monitor.js
+# 进程树里，pkill 漏掉后它们会一直写 data/，导致 fnOS 回滚 rm -rf 报 "directory not empty"
+# → 回滚失败 → 数据丢失（2026-09-28 事故）。
+for _pat in "bill-watcher" "bill_watcher" "photo_describer" "photo-describer" \
+            "chat-record-archiver" "chat_record_archiver" "gateway_watchdog" \
+            "${TRIM_PKGHOME}/data/scripts/"; do
+    pkill -9 -f "${_pat}" 2>/dev/null || true
+done
+log_msg "辅助进程清理完成 (bill-watcher / photo_describer / chat-record-archiver)"
+
+# 等待进程完全退出（最多 15 秒），避免文件句柄残留导致 fnOS 权限设置失败
 _wait=0
-while [ ${_wait} -lt 10 ]; do
+while [ ${_wait} -lt 15 ]; do
     if ! pgrep -f "node.*monitor\.js" >/dev/null 2>&1 \
        && ! pgrep -f "bun.*monitor\.js" >/dev/null 2>&1 \
        && ! pgrep -f "hermes.*gateway" >/dev/null 2>&1 \
-       && ! pgrep -f "hermes.*dashboard" >/dev/null 2>&1; then
+       && ! pgrep -f "hermes.*dashboard" >/dev/null 2>&1 \
+       && ! pgrep -f "bill-watcher|bill_watcher|photo_describer|chat-record-archiver" >/dev/null 2>&1; then
         break
     fi
     sleep 1
@@ -54,7 +65,27 @@ if [ -d "${CACHE_DIR}" ]; then
     log_msg "清理 .cache 目录 (${CACHE_SIZE})"
     rm -rf "${CACHE_DIR}/ms-playwright" "${CACHE_DIR}/chrome-devtools-mcp" "${CACHE_DIR}/node" "${CACHE_DIR}/uv" 2>/dev/null || true
 fi
-rm -rf /vol1/@apphome/.appstore-upgrade-rollback-hermes-agent-* 2>/dev/null || true
+# ⚠️ 严禁删除 fnOS 的回滚备份目录：升级失败时它是唯一的数据来源（2026-09-28 数据全丢事故）
+log_msg "跳过回滚备份目录清理（交给 fnOS 自管）"
+
+# ── 升级前自救备份（覆盖式安装时同样需要；@appdata 不参与 apphome 回滚）──
+BK_ROOT="${TRIM_PKGVAR:-/vol1/@appdata/hermes-agent}/preupgrade-backup"
+if [ -d "${TRIM_PKGHOME}/data" ]; then
+    mkdir -p "${BK_ROOT}" 2>/dev/null || true
+    BK_FILE="${BK_ROOT}/data-$(date +%Y%m%d-%H%M%S).tar.gz"
+    if tar czf "${BK_FILE}.part" -C "${TRIM_PKGHOME}/data" \
+         --exclude='./venv' --exclude='./.cache' --exclude='./node' \
+         --exclude='./npm-global' --exclude='./uv' --exclude='./.uv-cache' \
+         --exclude='./workspace/recovery-backups' \
+         --exclude='*.log' --exclude='*.log.*' . 2>/dev/null; then
+        mv -f "${BK_FILE}.part" "${BK_FILE}" 2>/dev/null || rm -f "${BK_FILE}.part"
+        log_msg "自救备份完成: ${BK_FILE} ($(du -h "${BK_FILE}" 2>/dev/null | cut -f1))"
+    else
+        rm -f "${BK_FILE}.part" 2>/dev/null || true
+        log_msg "WARNING: 自救备份失败（继续安装）"
+    fi
+    ls -1t "${BK_ROOT}"/data-*.tar.gz 2>/dev/null | tail -n +4 | while IFS= read -r _old; do rm -f "${_old}" 2>/dev/null || true; done
+fi
 
 # 端口冲突清理：安装前杀掉占用应用端口（8650 UI / 8742 gateway / 9219 dashboard）的旧 hermes 进程，
 # 避免端口被占导致安装或启动失败（例如残留的独立安装 gateway）

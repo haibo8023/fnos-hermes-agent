@@ -48,6 +48,12 @@ export UV_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
 # curl 从阿里云 PyPI 镜像直接下载 uv wheel，unzip 提取二进制
 # ---------------------------------------------------------------------------
 ensure_uv() {
+    # 坏软链（自指/悬空）会让 [ -x ] 为假但文件仍占位 → 后续 curl -o / unzip 必定失败，
+    # 最终在调用处报 ELOOP。先清掉再走下载流程（2026-09-28 事故）。
+    if [ ! -x "${UV_BIN}/uv" ] && { [ -e "${UV_BIN}/uv" ] || [ -L "${UV_BIN}/uv" ]; }; then
+        log_msg "WARNING: ${UV_BIN}/uv 存在但不可执行(坏软链?)，先删除"
+        rm -f "${UV_BIN}/uv" 2>/dev/null || true
+    fi
     if [ -x "${UV_BIN}/uv" ]; then
         UV="${UV_BIN}/uv"
         log_msg "uv found (persistent): ${UV}"
@@ -386,16 +392,42 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
     # ── 内置 venv 快速部署(免在线安装,秒级) ──
     if [ -f "${APP_DIR}/venv-bundle.tar.gz" ]; then
         log_msg ">>> 检测到内置 venv,直接解压部署(免在线安装)..."
+        # ⚠️ venv-bundle.tar.gz 的**根部就是 venv 内容**（./pyvenv.cfg ./bin/ ./lib/），
+        # 必须解到 ${VENV_DIR}。历史 bug：解到 ${DATA_DIR} 造成
+        #   1) venv 落到 data/ 根部 → 永远检测不到 → 每次安装都白跑一遍在线安装
+        #   2) bundle 里的 ./bin/uv（软链 → ${DATA_DIR}/bin/uv）覆盖真正的 uv 二进制，
+        #      变成自指软链 → 报 "Too many levels of symbolic links"（2026-09-28 实测）
         rm -rf "${VENV_DIR}" 2>/dev/null || true
-        mkdir -p "${DATA_DIR}"
-        tar xzf "${APP_DIR}/venv-bundle.tar.gz" -C "${DATA_DIR}" 2>>"${LOG_FILE}"
+        mkdir -p "${VENV_DIR}"
+        tar xzf "${APP_DIR}/venv-bundle.tar.gz" -C "${VENV_DIR}" 2>>"${LOG_FILE}"
+        # 兼容"带 venv/ 前缀"的旧 bundle：展平一层
+        if [ ! -x "${VENV_DIR}/bin/python3" ] && [ -x "${VENV_DIR}/venv/bin/python3" ]; then
+            log_msg "检测到 venv/ 前缀 bundle，展平目录 ..."
+            mv "${VENV_DIR}"/venv/* "${VENV_DIR}"/ 2>/dev/null || true
+            mv "${VENV_DIR}"/venv/.[!.]* "${VENV_DIR}"/ 2>/dev/null || true
+            rmdir "${VENV_DIR}/venv" 2>/dev/null || true
+        fi
+        # 清掉自指/悬空的 uv 软链（历史 bundle 缺陷遗毒）
+        if [ -L "${VENV_DIR}/bin/uv" ] && [ ! -e "${VENV_DIR}/bin/uv" ]; then
+            log_msg "WARNING: 移除自指 uv 软链 ${VENV_DIR}/bin/uv"
+            rm -f "${VENV_DIR}/bin/uv" 2>/dev/null || true
+        fi
+        if [ -L "${VENV_DIR}/bin/uv" ]; then
+            ln -sfn "${UV_BIN}/uv" "${VENV_DIR}/bin/uv" 2>/dev/null || true
+        fi
         if [ -x "${VENV_DIR}/bin/python3" ]; then
-            # 重写 editable 路径指向实际 hermes-src(内置 venv 打包自 249,路径不同)
+            # 重写 editable 路径指向实际 hermes-src(bundle 可能打包自 /vol1 或 /vol3 构建机)
             for f in "${VENV_DIR}"/lib/python*/site-packages/__editable___hermes_agent_*_finder.py; do
-                [ -f "$f" ] && sed -i "s|/vol3/@appcenter/hermes-agent/hermes-src|${HERMES_SRC}|g" "$f"
+                [ -f "$f" ] && sed -i "s|/vol[0-9]*/@appcenter/hermes-agent/hermes-src|${HERMES_SRC}|g" "$f"
             done
-            # bin/* 脚本 shebang 重写
-            sed -i "s|/vol3/@apphome/hermes-agent/data/venv|${VENV_DIR}|g" "${VENV_DIR}/bin/hermes" 2>/dev/null || true
+            # bin/* 脚本 shebang 与 venv 内部路径重写（跳过软链，避免 sed 穿透改到目标文件）
+            for f in "${VENV_DIR}"/bin/*; do
+                [ -f "$f" ] && [ ! -L "$f" ] || continue
+                sed -i "s|/vol[0-9]*/@apphome/hermes-agent/data/venv|${VENV_DIR}|g" "$f" 2>/dev/null || true
+            done
+            for f in "${VENV_DIR}"/pyvenv.cfg "${VENV_DIR}"/lib/python*/site-packages/*.pth; do
+                [ -f "$f" ] && sed -i "s|/vol[0-9]*/@apphome/hermes-agent/data/venv|${VENV_DIR}|g" "$f" 2>/dev/null || true
+            done
             # chown 归 hermes-agent(内置 venv 打包时属主为 root)
             chown -R hermes-agent:hermes-agent "${VENV_DIR}" 2>/dev/null || chown -R hermes-agent "${VENV_DIR}" 2>/dev/null || true
             log_msg ">>> 内置 venv 部署完成,跳过在线安装"

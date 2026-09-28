@@ -26,13 +26,25 @@ pkill -9 -f "bun.*monitor\.js" 2>/dev/null || true
 pkill -9 -f "hermes.*gateway" 2>/dev/null || true
 pkill -9 -f "hermes.*dashboard" 2>/dev/null || true
 
-# 等待进程完全退出（最多 10 秒），避免文件句柄残留导致 fnOS 解压/权限设置失败
+# ⚠️ 关键：常驻辅助进程不在 monitor.js 进程树里（上面的 pkill 漏掉），会一直往 data/ 写文件，
+# 使 fnOS 升级失败回滚时的 `rm -rf /vol1/@apphome/hermes-agent` 报
+# "unlinkat .../data: directory not empty" → 回滚中止 → 用户数据被删且无备份可还原。
+# 这是 2026-09-28 数据全丢事故的直接推手。
+for _pat in "bill-watcher" "bill_watcher" "photo_describer" "photo-describer" \
+            "chat-record-archiver" "chat_record_archiver" "gateway_watchdog" \
+            "${TRIM_PKGHOME}/data/scripts/"; do
+    pkill -9 -f "${_pat}" 2>/dev/null || true
+done
+log_msg "辅助进程清理完成 (bill-watcher / photo_describer / chat-record-archiver)"
+
+# 等待进程完全退出（最多 15 秒），避免文件句柄残留导致 fnOS 解压/权限设置失败
 _wait=0
-while [ ${_wait} -lt 10 ]; do
+while [ ${_wait} -lt 15 ]; do
     if ! pgrep -f "node.*monitor\.js" >/dev/null 2>&1 \
        && ! pgrep -f "bun.*monitor\.js" >/dev/null 2>&1 \
        && ! pgrep -f "hermes.*gateway" >/dev/null 2>&1 \
-       && ! pgrep -f "hermes.*dashboard" >/dev/null 2>&1; then
+       && ! pgrep -f "hermes.*dashboard" >/dev/null 2>&1 \
+       && ! pgrep -f "bill-watcher|bill_watcher|photo_describer|chat-record-archiver" >/dev/null 2>&1; then
         break
     fi
     sleep 1
@@ -72,13 +84,31 @@ if [ -d "${CACHE_DIR}" ]; then
     log_msg "清理后 .cache: ${AFTER_SIZE}"
 fi
 
-# 清理旧的升级回滚备份目录（fnOS 不自动清理，积累会占大量空间）
-BACKUP_GLOB="/vol1/@apphome/.appstore-upgrade-rollback-hermes-agent-*"
-BACKUP_COUNT="$(ls -d ${BACKUP_GLOB} 2>/dev/null | wc -l)"
-if [ "${BACKUP_COUNT}" -gt 0 ]; then
-    BACKUP_TOTAL="$(du -shc ${BACKUP_GLOB} 2>/dev/null | tail -1 | awk '{print $1}')"
-    log_msg "清理 ${BACKUP_COUNT} 个旧回滚备份目录 (共 ${BACKUP_TOTAL})"
-    rm -rf ${BACKUP_GLOB} 2>/dev/null || true
+# ⚠️ 严禁删除 /vol1/@apphome/.appstore-upgrade-rollback-hermes-agent-*：
+#    那是 fnOS 升级前的回滚备份，也是升级失败时唯一的数据来源。
+#    2026-09-28 事故：本脚本主动删除旧回滚备份 + fnOS 回滚自身失败
+#    → 2.8GB 用户数据（会话库/配置/技能/记忆/自建脚本）全丢。
+#    该目录一律交给 fnOS 自己管理。
+log_msg "跳过回滚备份目录清理（fnOS 自管，删了就没救命稻草）"
+
+# ── 升级前自救备份：把不可再生的关键数据另存到 @appdata ──
+# @appdata 不参与 apphome 回滚，比 fnOS 的回滚备份更稳。
+BK_ROOT="${TRIM_PKGVAR:-/vol1/@appdata/hermes-agent}/preupgrade-backup"
+if [ -d "${TRIM_PKGHOME}/data" ]; then
+    mkdir -p "${BK_ROOT}" 2>/dev/null || true
+    BK_FILE="${BK_ROOT}/data-$(date +%Y%m%d-%H%M%S).tar.gz"
+    if tar czf "${BK_FILE}.part" -C "${TRIM_PKGHOME}/data" \
+         --exclude='./venv' --exclude='./.cache' --exclude='./node' \
+         --exclude='./npm-global' --exclude='./uv' --exclude='./.uv-cache' \
+         --exclude='./workspace/recovery-backups' \
+         --exclude='*.log' --exclude='*.log.*' . 2>/dev/null; then
+        mv -f "${BK_FILE}.part" "${BK_FILE}" 2>/dev/null || rm -f "${BK_FILE}.part"
+        log_msg "自救备份完成: ${BK_FILE} ($(du -h "${BK_FILE}" 2>/dev/null | cut -f1))"
+    else
+        rm -f "${BK_FILE}.part" 2>/dev/null || true
+        log_msg "WARNING: 自救备份失败（继续升级）"
+    fi
+    ls -1t "${BK_ROOT}"/data-*.tar.gz 2>/dev/null | tail -n +4 | while IFS= read -r _old; do rm -f "${_old}" 2>/dev/null || true; done
 fi
 
 # 清理轮转日志（>5MB 的 .log.* 文件）
