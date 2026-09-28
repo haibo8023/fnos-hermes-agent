@@ -78,10 +78,11 @@ jobs:
         if: steps.check.outputs.changed == 'true'
         run: |
           set -euo pipefail
-          if [ -n "$(git status --porcelain app/hermes-src)" ]; then
+          changes="$(git status --porcelain app/hermes-src)"
+          if [ -n "$changes" ]; then
             echo "runtime_changed=true" >> "$GITHUB_OUTPUT"
             echo "◈ app/hermes-src 有运行时变化："
-            git status --porcelain app/hermes-src | head -20
+            printf '%s\n' "$changes" | head -20 || true
           else
             echo "runtime_changed=false" >> "$GITHUB_OUTPUT"
             echo "◈ 上游提交未影响运行时（app/hermes-src 无变化）→ 本轮只记录上游状态，不构建不发布"
