@@ -172,6 +172,258 @@ def _resolve_session_id(db, session_id: str) -> Optional[str]:
             raise
 
 
+# ── Script-only cron runs (no SessionDB row) ─────────────────────────────────
+# A ``no_agent`` cron job writes no session at all: its run history is built from
+# the output docs under ``<home>/cron/output/<job_id>/`` and the rows carry ids of
+# the shape ``cron_output:<job_id>:<stem>`` (see web_routers/cron.py). The desktop
+# reuses the session view for those rows, so a missing detail/messages answer used
+# to 404 straight into the session panel and crash it ("sessions" failed to render).
+
+_CRON_OUTPUT_ID_PREFIX = "cron_output:"
+# Job ids and filename stems are used as path segments — keep them to a set that
+# cannot climb out of the job's output directory.
+_CRON_OUTPUT_SEGMENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_CRON_OUTPUT_EXEC_RE = re.compile(r":exec:(\d+)$")
+_CRON_OUTPUT_MAX_CHARS = 200_000
+_CRON_OUTPUT_PREVIEW_CHARS = 180
+
+
+def _parse_cron_output_id(session_id: Optional[str]):
+    """Split a run-history id into ``(job_id, kind, ref)``; None when it is not one.
+
+    ``kind`` is ``doc`` (a stored ``.md`` output), ``exec`` (a ledger attempt whose
+    doc is gone) or ``latest`` (metadata-only row). Job ids never contain a colon,
+    so the trailing segment(s) are unambiguous. Anything that does not match the
+    producer's shapes — including traversal attempts — is rejected here.
+    """
+    if not session_id or not session_id.startswith(_CRON_OUTPUT_ID_PREFIX):
+        return None
+    rest = session_id[len(_CRON_OUTPUT_ID_PREFIX):]
+    if not rest:
+        return None
+    if rest.endswith(":latest"):
+        job_id = rest[: -len(":latest")]
+        if not _CRON_OUTPUT_SEGMENT_RE.fullmatch(job_id):
+            return None
+        return job_id, "latest", None
+    match = _CRON_OUTPUT_EXEC_RE.search(rest)
+    if match:
+        job_id = rest[: match.start()]
+        if not _CRON_OUTPUT_SEGMENT_RE.fullmatch(job_id):
+            return None
+        return job_id, "exec", int(match.group(1))
+    if ":" not in rest:
+        return None
+    job_id, stem = rest.rsplit(":", 1)
+    if not _CRON_OUTPUT_SEGMENT_RE.fullmatch(job_id) or not _CRON_OUTPUT_SEGMENT_RE.fullmatch(stem):
+        return None
+    return job_id, "doc", stem
+
+
+def _cron_output_path(profile: Optional[str], job_id: str, stem: str) -> Optional[Path]:
+    """The run's output doc, or None when the job home cannot be resolved."""
+    from hermes_cli.web_routers.cron import _cron_output_runs_dir
+
+    try:
+        runs_dir = Path(_cron_output_runs_dir(profile, job_id))
+    except Exception:
+        return None
+    return runs_dir / f"{stem}.md"
+
+
+def _cron_output_text(path: Optional[Path]):
+    """Read the output doc: ``(text, truncated)``; empty when unreadable."""
+    if path is None:
+        return "", False
+    try:
+        raw = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return "", False
+    if len(raw) > _CRON_OUTPUT_MAX_CHARS:
+        return raw[:_CRON_OUTPUT_MAX_CHARS], True
+    return raw, False
+
+
+def _cron_output_title(text: str, fallback: str) -> str:
+    """First non-empty line of the report (heading markers stripped)."""
+    for line in (text or "").splitlines():
+        stripped = line.strip().lstrip("#").strip()
+        if stripped:
+            return stripped[:200]
+    return fallback
+
+
+def _cron_output_started_at(path: Optional[Path], fallback: Optional[float]) -> float:
+    """Run epoch seconds, decoded the same way the run list decodes it."""
+    if path is not None:
+        from hermes_cli.web_routers.cron import _cron_output_run_timestamp
+
+        stamp = _cron_output_run_timestamp(path)
+        if stamp:
+            return float(stamp)
+        try:
+            return float(path.stat().st_mtime)
+        except OSError:
+            pass
+    return float(fallback or 0.0)
+
+
+def _cron_output_job_meta(profile: Optional[str], job_id: str):
+    """``(status_label, error)`` from the job record — best effort, never fatal."""
+    try:
+        from hermes_cli.web_routers.cron import _get_cron_job_sync
+
+        job = _get_cron_job_sync(job_id, profile)
+    except Exception:
+        return "", ""
+    if not isinstance(job, dict):
+        return "", ""
+    return (
+        str(job.get("last_status") or "").strip().replace("_", " ").upper(),
+        str(job.get("last_error") or "").strip())
+
+
+def _cron_output_attempt_meta(profile: Optional[str], job_id: str, index: int):
+    """``(finished_at, status_label, error)`` for ledger attempt *index*."""
+    try:
+        from hermes_cli.web_routers.cron import _owner_profile_executions
+
+        attempts = _owner_profile_executions(job_id)
+    except Exception:
+        return None, "", ""
+    if not (0 <= index < len(attempts)):
+        return None, "", ""
+    attempt = attempts[index]
+    return (
+        attempt.get("finished_at") or attempt.get("claimed_at"),
+        str(attempt.get("status") or "").replace("_", " ").upper(),
+        str(attempt.get("error") or "").strip())
+
+
+def _cron_output_placeholder(job_id: str, kind: str, ref, status_label: str, error: str) -> str:
+    """Report text for a run whose output doc is gone (pruned, or never written)."""
+    lines = ["# Cron run (script-only)", "", f"**Job ID:** {job_id}"]
+    if kind == "exec":
+        lines.append(f"**Attempt:** #{ref} (no output doc on disk)")
+    elif kind == "latest":
+        lines.append("**Run:** latest (no output doc on disk)")
+    if status_label:
+        lines.append(f"**Status:** {status_label}")
+    if error:
+        lines.append(f"**Error:** {error}")
+    return "\n".join(lines) + "\n"
+
+
+def _cron_output_detail(profile: Optional[str], session_id: str) -> Optional[dict]:
+    """Synthesise the session detail for a script-only cron run id.
+
+    Returns None only when *session_id* is not a ``cron_output:`` id — i.e. the
+    caller keeps owning real sessions. Every well-formed run id gets a renderable
+    payload, including ``exec:``/``latest`` rows and a ``doc`` whose file was
+    pruned between the list request and the click.
+    """
+    parsed = _parse_cron_output_id(session_id)
+    if parsed is None:
+        return None
+    job_id, kind, ref = parsed
+
+    path = _cron_output_path(profile, job_id, ref) if kind == "doc" else None
+    if path is not None and not path.is_file():
+        path = None
+    text, truncated = _cron_output_text(path)
+
+    status_label, error = _cron_output_job_meta(profile, job_id)
+    attempt_at = None
+    if kind == "exec":
+        attempt_at, attempt_status, attempt_error = _cron_output_attempt_meta(profile, job_id, ref)
+        status_label = attempt_status or status_label
+        error = attempt_error or error
+
+    started_at = _cron_output_started_at(path, attempt_at)
+    fallback_title = f"{status_label} · Script-only run" if status_label else "Script-only run"
+    title = _cron_output_title(text, fallback_title)
+    if not text:
+        text = _cron_output_placeholder(job_id, kind, ref, status_label, error)
+
+    profile_name = _serving_profile(profile)
+    preview = re.sub(r"\s+", " ", text).strip()[:_CRON_OUTPUT_PREVIEW_CHARS] or None
+    return {
+        "id": session_id,
+        "session_id": session_id,
+        "title": title,
+        "source": "cron_output",
+        "model": None,
+        "cwd": None,
+        "started_at": started_at,
+        "last_active": started_at,
+        "ended_at": started_at,
+        "message_count": 1,
+        "tool_call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "preview": preview,
+        "archived": False,
+        "pinned": False,
+        "is_active": False,
+        "profile": profile_name,
+        "is_default_profile": profile_name == "default",
+        # The run's report verbatim: the session view renders it as the single
+        # message returned by _cron_output_messages.
+        "content": text,
+        "cron_output": {
+            "job_id": job_id,
+            "kind": kind,
+            "file": path.name if path is not None else None,
+            "path": str(path) if path is not None else None,
+            "status": status_label or None,
+            "error": error or None,
+            "content": text,
+            "content_truncated": truncated,
+        },
+    }
+
+
+def _cron_output_messages(profile: Optional[str], session_id: str) -> Optional[dict]:
+    """Same payload shape as GET /api/sessions/{id}/messages, one synthetic message."""
+    detail = _cron_output_detail(profile, session_id)
+    if detail is None:
+        return None
+    return {
+        "session_id": session_id,
+        "profile": detail["profile"],
+        "messages": [{
+            "id": 0,
+            "session_id": session_id,
+            "role": "assistant",
+            "content": detail["content"],
+            "tool_calls": None,
+            "tool_call_id": None,
+            "tool_name": None,
+            "timestamp": detail["started_at"],
+            "token_count": None,
+            "active": 1,
+            "compacted": 0,
+            "display_kind": None,
+        }],
+        "pagination": {"limit": 1, "offset": 0, "order": "oldest", "returned": 1},
+    }
+
+
+def _cron_output_page(page: dict, *, limit: Optional[int], offset: int, order: Optional[str]) -> dict:
+    """Apply the caller's window/pagination echo to the single-message page."""
+    messages = page["messages"]
+    start = max(0, offset)
+    size = 500 if limit is None else max(0, limit)
+    window = messages[start:start + size] if start < len(messages) else []
+    page["messages"] = window
+    page["pagination"] = {
+        "limit": size, "offset": offset,
+        "order": order or ("latest" if limit is None else "oldest"),
+        "returned": len(window)}
+    return page
+
+
+
 # ``le=100`` on limit: an unbounded limit lets one request drag every session
 # row (plus correlated-subquery preview work) out of SQLite in a single hit.
 @list_router.get("/api/sessions")
@@ -516,6 +768,12 @@ async def get_session_stats(profile: Optional[str] = None):
 
 @manage_router.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str, profile: Optional[str] = None):
+    # Script-only cron runs are not in SessionDB: answer from the run's output
+    # doc instead of 404-ing the desktop into a crashed session panel.
+    cron_run = await asyncio.to_thread(_cron_output_detail, profile, session_id)
+    if cron_run is not None:
+        return cron_run
+
     def _detail(db):
         sid = _resolve_session_id(db, session_id)
         session = db.get_session(sid) if sid else None
@@ -532,6 +790,12 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
 
 @manage_router.get("/api/sessions/{session_id}/latest-descendant")
 async def get_session_latest_descendant(session_id: str, profile: Optional[str] = None):
+    if _parse_cron_output_id(session_id) is not None:
+        # A run record has no compression lineage; answer from itself so the
+        # desktop's "follow the newest segment" prefetch cannot 404 the panel.
+        return {"requested_session_id": session_id, "session_id": session_id,
+                "path": [session_id], "changed": False}
+
     latest, path = await asyncio.to_thread(
         _with_db, profile, lambda db: _session_latest_descendant(session_id, db), read_only=True)
     if not latest:
@@ -639,6 +903,10 @@ async def get_session_messages(
     include_compacted: bool = Query(False), inline_images: bool = Query(True)):
     if order not in (None, "oldest", "latest"):
         raise HTTPException(status_code=400, detail="order must be one of: oldest, latest")
+
+    cron_page = await asyncio.to_thread(_cron_output_messages, profile, session_id)
+    if cron_page is not None:
+        return _cron_output_page(cron_page, limit=limit, offset=offset, order=order)
 
     def _read(db):
         sid = _resolve_session_id(db, session_id)
