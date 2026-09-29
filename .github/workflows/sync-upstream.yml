@@ -3,6 +3,11 @@ name: Sync Upstream & Build & Release
 on:
   # 手动触发（随时可点）
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: '强制构建发布（上游无运行时变化时也出包；用于 fpk/打包脚本类修复）'
+        type: boolean
+        default: false
   # 定时自动同步官方上游：有新版本/新提交就自动 构建 → 包内校验 → 收敛仓库 → 发布 Release；
   # 上游无变化时 sync-upstream.js 直接退出、后续步骤全部跳过（安静、无任何副作用）。
   # UTC 02:10 / 14:10 = 北京时间 10:10 / 22:10。
@@ -35,7 +40,15 @@ jobs:
       - name: Detect upstream & bump version
         id: version
         run: |
+          BEFORE="$(cat VERSION)"
           node scripts/sync-upstream.js
+          # force_build：上游未推进版本时手动推进 build 号，
+          # 让「只改 fpk/打包脚本」的修复也能出包（2026-09-29：cmd/main 丢可执行位这类包内缺陷）
+          if [ "$BEFORE" = "$(cat VERSION)" ] && [ "${{ inputs.force_build }}" = "true" ]; then
+            NEXT="$(awk -F. '{printf "%s.%s.%s.%02d", $1, $2, $3, $4+1}' VERSION)"
+            echo "$NEXT" > VERSION
+            echo "◈ force_build：VERSION $BEFORE → $NEXT"
+          fi
           echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
       # 拉取上游（官方 monorepo，运行时核心在仓库根）
@@ -79,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           changes="$(git status --porcelain app/hermes-src)"
-          if [ -n "$changes" ]; then
+          if [ -n "$changes" ] || [ "${{ inputs.force_build }}" = "true" ]; then
             echo "runtime_changed=true" >> "$GITHUB_OUTPUT"
             echo "◈ app/hermes-src 有运行时变化："
             printf '%s\n' "$changes" | head -20 || true
@@ -156,6 +169,13 @@ jobs:
             || { echo "✗ 包内缺 venv-bundle.tar.gz" >&2; exit 1; }
           grep -qE '(^|/)hermes-src/hermes_platform/__init__\.py$' /tmp/pkg-list.txt \
             || { echo "✗ 包内缺 hermes-src/hermes_platform" >&2; exit 1; }
+          # 生命周期脚本必须带可执行位：fnOS 应用中心靠 fork/exec cmd/main 判断/启停应用，
+          # 缺 x 位 → "fork/exec … permission denied" → 启动任务失败 10332「本地应用不允许启动」
+          # → app 表 status 卡在 start → 桌面/应用中心打不开应用（2026-09-29 实测事故）
+          CMD_MODE="$(tar tzvf "$FPK" cmd/main | awk '{print $1}')"
+          [ "$CMD_MODE" = "-rwxr-xr-x" ] \
+            || { echo "✗ 包内 cmd/main 权限异常: $CMD_MODE（应为 -rwxr-xr-x）" >&2; exit 1; }
+          echo "✓ 包内 cmd/main 权限正确: $CMD_MODE"
           echo "✓ 包内校验通过：hermes_platform + venv-bundle 均在包内，目标版本 = $WANT"
 
       # 先收敛仓库（VERSION / .upstream-state / 受控合并结果），再发布 Release。

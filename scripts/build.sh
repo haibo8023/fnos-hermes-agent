@@ -142,6 +142,11 @@ echo "── 打包完整 FPK ──"
   cp "$BUILD_DIR/app.tgz" "$FPK_STAGE/"
   cp fpk/manifest "$FPK_STAGE/"
   cp -r fpk/cmd "$FPK_STAGE/"
+  # 生命周期脚本必须带可执行位：fnOS 应用中心用 fork/exec cmd/main 判断与启停应用，
+  # 缺 x 位会报 "fork/exec ... permission denied" → 启动任务失败 10332「本地应用不允许启动」
+  # → app 表 status 卡在 start，桌面/应用中心打不开应用（2026-09-29 实测事故）。
+  # git 已固化 755（fpk/cmd/*），这里再兜一层，防止检出/复制环节丢位。
+  chmod 755 "$FPK_STAGE"/cmd/*
   cp -r fpk/bin "$FPK_STAGE/" 2>/dev/null || true
   cp -r fpk/config "$FPK_STAGE/"
   cp fpk/ICON.PNG fpk/ICON_256.PNG fpk/LICENSE "$FPK_STAGE/" 2>/dev/null || true
