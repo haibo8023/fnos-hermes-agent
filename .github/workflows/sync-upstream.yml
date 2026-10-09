@@ -13,6 +13,8 @@ on:
   # UTC 02:10 / 14:10 = 北京时间 10:10 / 22:10。
   # 注：仓库连续 60 天无活动时 GitHub 会自动停用 schedule（会邮件提醒，重新启用即可）。
   schedule:
+    # TEMP(2026-10-10): 验证「转独立仓库后 fork 的 schedule 限制是否解除」
+    - cron: '*/20 * * * *'
     - cron: '10 2,14 * * *'
 
 permissions:
