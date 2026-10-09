@@ -402,9 +402,20 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
         #   1) venv 落到 data/ 根部 → 永远检测不到 → 每次安装都白跑一遍在线安装
         #   2) bundle 里的 ./bin/uv（软链 → ${DATA_DIR}/bin/uv）覆盖真正的 uv 二进制，
         #      变成自指软链 → 报 "Too many levels of symbolic links"（2026-09-28 实测）
-        rm -rf "${VENV_DIR}" 2>/dev/null || true
-        mkdir -p "${VENV_DIR}"
-        tar xzf "${APP_DIR}/venv-bundle.tar.gz" -C "${VENV_DIR}" 2>>"${LOG_FILE}"
+        # 支持两种布局：
+        #   新（2026-10-10 起）: 根部 venv/ + python/（自带 CPython ≥3.12 解释器）
+        #   旧                : 根部即 venv 内容（依赖系统 Python 3.11）
+        # 上游运行时自 0.21.6 起需要 Python ≥3.12（PEP 649 延迟注解等），旧布局已不适用。
+        if tar tzf "${APP_DIR}/venv-bundle.tar.gz" 2>/dev/null | grep -q '^venv/'; then
+            log_msg "检测到新布局 bundle（venv/ + python/），解压到 ${DATA_DIR} ..."
+            rm -rf "${VENV_DIR}" "${DATA_DIR}/python" 2>/dev/null || true
+            tar xzf "${APP_DIR}/venv-bundle.tar.gz" -C "${DATA_DIR}" 2>>"${LOG_FILE}"
+        else
+            log_msg "检测到旧布局 bundle（根部即 venv），解压到 ${VENV_DIR} ..."
+            rm -rf "${VENV_DIR}" 2>/dev/null || true
+            mkdir -p "${VENV_DIR}"
+            tar xzf "${APP_DIR}/venv-bundle.tar.gz" -C "${VENV_DIR}" 2>>"${LOG_FILE}"
+        fi
         # 兼容"带 venv/ 前缀"的旧 bundle：展平一层
         if [ ! -x "${VENV_DIR}/bin/python3" ] && [ -x "${VENV_DIR}/venv/bin/python3" ]; then
             log_msg "检测到 venv/ 前缀 bundle，展平目录 ..."
@@ -419,6 +430,32 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
         fi
         if [ -L "${VENV_DIR}/bin/uv" ]; then
             ln -sfn "${UV_BIN}/uv" "${VENV_DIR}/bin/uv" 2>/dev/null || true
+        fi
+        # ── 解释器路径修正：bundle 里记的是打包机绝对路径 → 改成本机 ${DATA_DIR} ──
+        PYROOT="${DATA_DIR}/python"
+        if [ -d "$PYROOT" ]; then
+            INTERP="$(ls -d "$PYROOT"/cpython-3*-linux-*/bin 2>/dev/null | head -1 || true)"
+            if [ -n "$INTERP" ]; then
+                log_msg "解释器目录: ${INTERP}"
+                sed -i "s|^home = .*|home = ${INTERP}|" "${VENV_DIR}/pyvenv.cfg" 2>/dev/null || true
+                ( cd "${VENV_DIR}/bin" 2>/dev/null && for b in python python3 python3.*; do
+                      [ -L "$b" ] || continue
+                      tgt="$(readlink "$b" 2>/dev/null || true)"
+                      case "$tgt" in /*) [ -x "${INTERP}/$(basename "$tgt")" ] && ln -sfn "${INTERP}/$(basename "$tgt")" "$b" ;; esac
+                  done ) || true
+            else
+                log_msg "WARNING: ${PYROOT} 下未找到 cpython-3*-linux-*，venv 可能无法启动"
+            fi
+        fi
+        # ── 版本守卫：上游运行时自 0.21.6 起要求 Python >=3.12 ──
+        # （3.11 下 PEP 649 延迟注解不存在 → 类体自引用注解 NameError → 网关/仪表盘全崩）
+        if [ -x "${VENV_DIR}/bin/python3" ]; then
+            PV="$("${VENV_DIR}/bin/python3" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo 0.0)"
+            log_msg "venv Python 版本 = ${PV}"
+            case "$PV" in
+                3.1[2-9]|3.[2-9][0-9]) : ;;
+                *) log_msg "ERROR: venv Python ${PV} 过旧（需 >=3.12），网关将无法启动 → 请更新 venv-bundle" ;;
+            esac
         fi
         if [ -x "${VENV_DIR}/bin/python3" ]; then
             # 重写 editable 路径指向实际 hermes-src(bundle 可能打包自 /vol1 或 /vol3 构建机)

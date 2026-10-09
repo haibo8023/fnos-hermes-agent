@@ -107,7 +107,8 @@ jobs:
           git commit -m "sync: 上游 ${{ steps.version.outputs.version }} 受控合并（保留移植修改）" --allow-empty || true
 
       # venv-bundle（约 70MB，不提交仓库）
-      #   1) 首选本仓库 Release 载体资产 venv-bundle.tar.gz（tag=venv-bundle-0.21.4.1）
+      #   1) 首选本仓库 Release 载体资产 venv-bundle.tar.gz（tag=venv-bundle-py314-0.21.6.05）
+#      布局：venv/ + python/（自带 CPython 3.14；上游 0.21.6 起运行时要求 Python >=3.12）
       #   2) 兜底：从本仓库最近一个 .fpk Release 里解包提取（不再依赖任何外部仓库）
       - name: Fetch venv-bundle
         if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
@@ -119,7 +120,7 @@ jobs:
           if [ -f fpk/venv-bundle.tar.gz ]; then
             echo "✓ venv-bundle 已存在于工作区"
           else
-            VENV_TAG="venv-bundle-0.21.4.1"
+            VENV_TAG="venv-bundle-py314-0.21.6.05"
             VENV_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VENV_TAG}/venv-bundle.tar.gz"
             echo "◈ 尝试本仓库载体: $VENV_URL"
             if curl -fsSL -o fpk/venv-bundle.tar.gz "$VENV_URL"; then
@@ -180,6 +181,32 @@ jobs:
       # 「tag+Release 已建、main 的 VERSION 没前进」的僵局 —— 之后每轮都算出同一版本号、
       # Check version changed 判定 changed=false，CI 会永久空转（2026-09-23 实际踩过）。
       # 现在任一步失败，下一轮都能靠 tag 与 VERSION 的差异自愈。
+      # ── 运行时冒烟：用包内 venv-bundle 自带的 Python 真跑一遍导入 ──
+      # 2026-10-10 事故：上游 0.21.6 运行时要求 Python >=3.12（PEP 649 延迟注解 +
+      # tarfile.extractall(filter=) 等 3.12+ API），而 bundle 还是 3.11.2 → 428 个模块
+      # import 即 NameError，网关/仪表盘起不来，前端报 "Could not connect to Hermes gateway"。
+      # 这一步专门拦「venv 与运行时不匹配」，比只看文件在不在强得多。
+      - name: Smoke test runtime with bundled venv
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/vbsmoke /tmp/vbsmoke-home && mkdir -p /tmp/vbsmoke /tmp/vbsmoke-home
+          tar xzf fpk/venv-bundle.tar.gz -C /tmp/vbsmoke
+          PY="$(ls -d /tmp/vbsmoke/python/cpython-3*-linux-*/bin/python3.[0-9]* 2>/dev/null | head -1 || true)"
+          SP="$(ls -d /tmp/vbsmoke/venv/lib/python3.*/site-packages 2>/dev/null | head -1 || true)"
+          [ -n "$PY" ] || { echo "✗ bundle 内未找到 CPython 解释器（新布局应为 python/cpython-*）" >&2; exit 1; }
+          [ -n "$SP" ] || { echo "✗ bundle 内未找到 venv/lib/python3.*/site-packages" >&2; exit 1; }
+          echo "bundle Python: $("$PY" --version 2>&1) | site-packages: $SP"
+          HERMES_HOME=/tmp/vbsmoke-home PYTHONPATH="$PWD/app/hermes-src:$SP" "$PY" -c "
+          import sys
+          assert sys.version_info >= (3, 12), (
+              f'bundle 的 Python 过旧（{sys.version.split()[0]}）：上游运行时自 0.21.6 起需要 >=3.12'
+              '（PEP 649 延迟注解 / tarfile filter 等）。请重建 venv-bundle。')
+          import gateway.config, hermes_cli.gateway, agent.context_engine, tools.terminal_tool, cron
+          print('✓ 运行时导入冒烟通过（Python', sys.version.split()[0], '）')
+          "
+          echo "✓ venv-bundle 与 app/hermes-src 兼容"
+
       - name: Push
         if: steps.check.outputs.changed == 'true'
         run: |
