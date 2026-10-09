@@ -34,7 +34,28 @@
       WSlog.push(rec);
       try {
         var os = ws.send.bind(ws);
-        ws.send = function (d) { if (rec.sent.length < 40) rec.sent.push(String(d).slice(0, 160)); return os(d); };
+        // 合成 cron 运行记录（cron_output: 前缀，脚本型 no_agent 任务的每次运行输出文档）
+        // 在网关里没有可 resume 的会话。直接发 session.resume 会拿到 4007，renderer 的 catch
+        // 只对「归属解析失败」走只读转录路径，于是把 4007 冒成「恢复失败 session not found」弹窗。
+        // 这里在本地抛同名错误（SessionOwnerResolutionError），让 renderer 按设计走它自己的
+        // 只读转录分支：展示运行输出 + 提示「已以只读方式打开」+ 禁用发送。
+        ws.send = function (d) {
+          try {
+            var _m = JSON.parse(typeof d === 'string' ? d : '');
+            if (_m && _m.method === 'session.resume' && _m.params &&
+                typeof _m.params.session_id === 'string' &&
+                _m.params.session_id.indexOf('cron_output:') === 0) {
+              var _e = new Error('run record has no resumable session');
+              _e.name = 'SessionOwnerResolutionError';
+              _e.sessionId = _m.params.session_id;
+              _e.method = _m.method;
+              throw _e;
+            }
+          } catch (_pe) {
+            if (_pe && _pe.name === 'SessionOwnerResolutionError') { throw _pe; }
+          }
+          if (rec.sent.length < 40) rec.sent.push(String(d).slice(0, 160)); return os(d);
+        };
         ws.addEventListener('message', function (ev) { if (rec.got.length < 40) rec.got.push(String(ev.data).slice(0, 160)); });
         ws.addEventListener('close', function (ev) { rec.close = ev.code + ' ' + (ev.reason || '').slice(0, 40); });
         ws.addEventListener('error', function () { rec.err = 1; });
