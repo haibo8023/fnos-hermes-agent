@@ -1,6 +1,6 @@
-# fnos-hermes-agent-web
+# fnos-hermes-agent
 
-飞牛 fnOS 上的 Hermes Agent 桌面端 Web 版。基于官方 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 集成，提供 fnOS 应用中心安装包（FPK）、桌面端 Web UI 汉化、飞牛管理技能（trim-cli）与 GitHub 增量更新。
+飞牛 fnOS 上的 Hermes Agent 桌面端 Web 版（**独立仓库**，非 fork：上游受控同步 + FPK 打包 + 自动发布 → `haibo8023/fnos-hermes-agent`）。基于官方 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 集成，提供 fnOS 应用中心安装包（FPK）、桌面端 Web UI 汉化、飞牛管理技能（trim-cli）与 GitHub 增量更新。
 
 ## 版本号机制
 

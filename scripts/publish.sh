@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-REPO="haibo8023/fnos-hermes-agent-web"
+REPO="haibo8023/fnos-hermes-agent"
 GITHUB_TOKEN="${GITHUB_TOKEN:?需要设置 GITHUB_TOKEN 环境变量}"
 CURL_BASE=(curl -sS)
 if [ -n "${GH_PROXY:-}" ]; then CURL_BASE+=(--socks5 "$GH_PROXY"); fi
