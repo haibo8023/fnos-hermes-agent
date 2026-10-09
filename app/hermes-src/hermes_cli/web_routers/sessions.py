@@ -16,7 +16,7 @@ from typing import Callable, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from hermes_cli.session_listing import subagent_listing_scope
 from hermes_cli.web_deps import late
@@ -392,7 +392,7 @@ def _cron_output_messages(profile: Optional[str], session_id: str) -> Optional[d
         "session_id": session_id,
         "profile": detail["profile"],
         "messages": [{
-            "id": 0,
+            "id": _CRON_OUTPUT_ROW_ID,
             "session_id": session_id,
             "role": "assistant",
             "content": detail["content"],
@@ -421,6 +421,61 @@ def _cron_output_page(page: dict, *, limit: Optional[int], offset: int, order: O
         "order": order or ("latest" if limit is None else "oldest"),
         "returned": len(window)}
     return page
+
+
+_CRON_OUTPUT_ROW_ID = 1
+
+
+def _cron_output_timeline(profile: Optional[str], session_id: str, *, limit: int, after_row_id: int):
+    """One synthetic prompt for the run's output, in the timeline's shape.
+
+    The desktop opens a chat by reading its timeline first, so without this the run
+    record 404s into the session panel and pops "resume failed".
+    """
+    detail = _cron_output_detail(profile, session_id)
+    if detail is None:
+        return None
+    entries = []
+    if after_row_id < _CRON_OUTPUT_ROW_ID:
+        entries.append({
+            "row_id": _CRON_OUTPUT_ROW_ID,
+            "preview": (detail.get("title") or detail.get("preview") or "")[:200],
+            "timestamp": detail["started_at"],
+        })
+    return {
+        "session_id": session_id,
+        "profile": detail["profile"],
+        "entries": entries,
+        "pagination": {"limit": limit, "after_row_id": after_row_id, "returned": len(entries),
+                       "total": 1, "has_more": False, "next_cursor": None},
+    }
+
+
+def _cron_output_around(profile: Optional[str], session_id: str, row_id: int, *, limit: int):
+    """Bounded page around the synthetic prompt; None when the id is not a run."""
+    page = _cron_output_messages(profile, session_id)
+    if page is None:
+        return None
+    if row_id != _CRON_OUTPUT_ROW_ID:
+        return {}          # route turns this into 404 "Prompt not found", like a real store
+    messages = page["messages"][:limit]
+    return {
+        "session_id": session_id,
+        "profile": page["profile"],
+        "messages": messages,
+        "pagination": {"row_id": row_id, "limit": limit, "returned": len(messages),
+                       "order": "oldest", "offset": 0, "total": 1,
+                       "has_older": False, "has_newer": False},
+    }
+
+
+def _cron_output_export(profile: Optional[str], session_id: str):
+    """Session + its single output message, so Export works on a run record."""
+    detail = _cron_output_detail(profile, session_id)
+    if detail is None:
+        return None
+    page = _cron_output_messages(profile, session_id) or {"messages": []}
+    return {**detail, "messages": page["messages"]}
 
 
 
@@ -1062,6 +1117,11 @@ async def get_session_timeline(
     """
     from hermes_state_timeline import get_session_timeline as read_timeline
 
+    cron_timeline = await asyncio.to_thread(
+        _cron_output_timeline, profile, session_id, limit=limit, after_row_id=after_row_id)
+    if cron_timeline is not None:
+        return cron_timeline
+
     owner = _serving_profile(profile)
 
     def _read(db):
@@ -1079,6 +1139,13 @@ async def get_session_messages_around(
 ):
     """Bounded display page starting at a timeline prompt; no intervening payloads."""
     from hermes_state_timeline import get_session_messages_around as read_around
+
+    cron_around = await asyncio.to_thread(
+        _cron_output_around, profile, session_id, row_id, limit=limit)
+    if cron_around is not None:
+        if not cron_around:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+        return cron_around
 
     owner = _serving_profile(profile)
 
@@ -1197,6 +1264,10 @@ def _compact_json(obj) -> str:
 @manage_router.get("/api/sessions/{session_id}/export")
 async def export_session_endpoint(session_id: str, profile: Optional[str] = None):
     """Stream a single session (metadata + messages) as JSON."""
+    cron_export = await asyncio.to_thread(_cron_output_export, profile, session_id)
+    if cron_export is not None:
+        return JSONResponse(cron_export)
+
     def _prepare_export(db):
         sid = _resolve_session_id(db, session_id)
         return (sid, db.get_session(sid)) if sid else None
