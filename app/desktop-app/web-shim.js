@@ -289,6 +289,50 @@
         return null
       }).catch(function () { return null })
     },
+    // 文件下载（浏览器模式）：Electron 用原生保存对话框，web 里改为从网关拉流 + <a download> 保存。
+    // 必须实现：未实现会落到 makeFallback 兜底 → Promise.resolve(null) → 调用方
+    // （media-*.js 里包装 saveGatewayFile 的下载函数）读 .saved 抛
+    // "Cannot read properties of null (reading saved)"（2026-10-10 实测：聊天里点下载即报此错）。
+    saveGatewayFile: function (opts) {
+      opts = opts || {};
+      var p = String(opts.path || "");
+      if (!p) return Promise.reject(new Error("saveGatewayFile: path is required"));
+      var name = String(opts.suggestedName || "");
+      var parts = name.split("\\").join("/").split("/");
+      var baseName = parts.filter(Boolean).pop() || "download";
+      var prof = opts.profile || (CONFIG && CONFIG.profile) || "";
+      var q = "path=" + encodeURIComponent(p);
+      var url;
+      if (opts.sessionId || prof) {
+        if (prof) q += "&profile=" + encodeURIComponent(prof);
+        if (opts.sessionId) q += "&session_id=" + encodeURIComponent(opts.sessionId);
+        url = base + "/api/fs/download?" + q;
+      } else {
+        url = base + "/api/files/download?" + q;
+      }
+      return fetch(url, {
+        headers: { "X-Hermes-Session-Token": token },
+        credentials: "include",
+      }).then(function (r) {
+        if (r.ok) return r.blob();
+        return r.text().catch(function () { return ""; }).then(function (t) {
+          throw new Error("HTTP " + r.status + (t ? " " + String(t).slice(0, 200) : ""));
+        });
+      }).then(function (blob) {
+        var objUrl = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = objUrl;
+        a.download = baseName;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+          try { document.body.removeChild(a); } catch (e) {}
+          try { URL.revokeObjectURL(objUrl); } catch (e) {}
+        }, 2000);
+        return { ok: true, saved: true, canceled: false, path: p, name: baseName, byteSize: blob.size };
+      });
+    },
     saveImageFromUrl: function (url) {
       return Promise.resolve(fetch(url)).then(function (r) {
         if (!r.ok) return ''
