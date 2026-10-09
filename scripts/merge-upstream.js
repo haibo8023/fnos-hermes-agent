@@ -6,6 +6,7 @@
 // 本脚本只把官方「运行时核心」同步进 app/hermes-src，并保证：
 //   1. 桌面端/非运行时内容（apps/native/web/website/docs/evals/assets…）不同步
 //   2. 我们移植层的修改（PORT_OVERRIDES）一律保留，官方更新不覆盖
+//   2.1 本地功能补丁 patches/*.patch 在合并后自动重放；补丁失配即构建失败（不静默丢功能）
 //   3. 其余官方更新（bug 修复/新功能）正常吸收
 //
 // 用法： node scripts/merge-upstream.js [--upstream <dir>] [--write]
@@ -196,6 +197,38 @@ if (report.updated.length) console.log('  UPDATED:\n   ' + report.updated.slice(
 if (report.added.length) console.log('  ADDED:\n   ' + report.added.slice(0, 20).join('\n   '));
 if (report.kept.length) console.log('  KEPT(移植修改保留):\n   ' + report.kept.join('\n   '));
 if (!WRITE) console.log('（dry-run：未写入，加 --write 实际应用）');
+
+// ── 本地功能补丁重放（patches/*.patch）──────────────────────────────
+// 上游与我们都在改的文件（例 hermes_cli/web_routers/sessions.py）不能进 PORT_OVERRIDES：
+// 冻结整份文件会连带丢掉官方后续修复。改为把本地新增功能存成补丁，每次合并后重新应用；
+// 上游改了同一段导致补丁失配时**让构建失败**，逼出人工适配，而不是静默丢功能。
+// 2026-09-29 实测教训：cron 运行记录修复被上游同步静默覆盖，已发布的包缺功能。
+const PATCH_DIR = path.join(ROOT, 'patches');
+if (WRITE && fs.existsSync(PATCH_DIR)) {
+  const patchFiles = fs.readdirSync(PATCH_DIR).filter((f) => f.endsWith('.patch')).sort();
+  for (const p of patchFiles) {
+    const rel = path.join('patches', p);
+    let already = false;
+    try {
+      execSync(`git apply --check "${rel}"`, { cwd: ROOT, stdio: 'pipe' });
+    } catch (applyErr) {
+      // 已经处于应用状态（重复运行 / 上游本就带该功能）时视为已满足
+      try {
+        execSync(`git apply --reverse --check "${rel}"`, { cwd: ROOT, stdio: 'pipe' });
+        already = true;
+      } catch {
+        console.error(`✗ 本地补丁无法重放: ${rel}`);
+        console.error('  上游改动了同一段代码 → 请人工适配该补丁后重新提交（不要删除补丁，否则功能会静默丢失）。');
+        console.error(String((applyErr && applyErr.stderr) || applyErr || '').trim().slice(0, 600));
+        process.exit(3);
+      }
+    }
+    if (already) { console.log(`= 本地补丁已处于应用状态，跳过: ${rel}`); continue; }
+    execSync(`git apply --whitespace=nowarn "${rel}"`, { cwd: ROOT, stdio: 'pipe' });
+    console.log(`✓ 本地补丁已重放: ${rel}`);
+  }
+  if (!patchFiles.length) console.log('（patches/ 为空，无需重放）');
+}
 
 // ── 更新 .upstream-state ───────────────────────────────────────────
 if (WRITE && latestSha) {
