@@ -102,7 +102,11 @@ if (LATEST_VER !== CUR_OFFICIAL) {
   //（避免 commit sha 获取失败（网络）被误判为"有新提交"而错误递增版本）
   console.log('⚠ 无法获取上游 commit sha，官方版本未变 → 保持当前版本，不递增');
   process.exit(0);
-} else if (LATEST_SHA === PREV_SHA && PREV_SHA) {
+} else if (PREV_SHA && LATEST_SHA.slice(0, 12) === PREV_SHA.slice(0, 12)) {
+  // 必须按 12 位短 sha 比较：.upstream-state 由 merge-upstream.js 写的是短 sha，
+  // 而这里 LATEST_SHA 来自 API 是全 40 位 —— 直接全等比永远不等，
+  // 于是「上游无新提交」这一天永远走不到，每次运行都自增 build 号并发布
+  // （2026-09-29 实测：一次上游同步把版本从 .06 一路推到 .03/.08 等多余版本）。
   console.log(`◈ 上游无新提交（${LATEST_SHA.slice(0, 12)}），无需同步`);
   process.exit(0);
 } else {
@@ -114,7 +118,7 @@ console.log('新版本:', NEW_VERSION);
 
 // ── 更新 VERSION 与状态 ───────────────────────────────────────────
 fs.writeFileSync(VERSION_FILE, NEW_VERSION + '\n');
-fs.writeFileSync(STATE_FILE, `PREV_OFFICIAL="${LATEST_VER}"\nPREV_SHA="${LATEST_SHA}"\n`);
+fs.writeFileSync(STATE_FILE, `PREV_OFFICIAL="${LATEST_VER}"\nPREV_SHA="${LATEST_SHA.slice(0, 12)}"\n`);
 console.log('VERSION →', NEW_VERSION);
 console.log('状态已记录: upstream', LATEST_VER, '@', LATEST_SHA.slice(0, 12));
 
