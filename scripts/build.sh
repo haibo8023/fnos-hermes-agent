@@ -167,24 +167,43 @@ echo "── 打包完整 FPK ──"
 # ── 生成增量更新包 ──────────────────────────────────────────────────
 echo "── 生成增量更新包 ──"
 if [ -n "$PREV_VERSION" ] && [ "$PREV_TAG" != "v$CUR_VERSION" ]; then
-  CHANGED_FILES="$(git diff --name-only "$PREV_TAG" HEAD -- app/ 2>/dev/null || true)"
-  if [ -n "$CHANGED_FILES" ]; then
+  # ⚠ 必须区分「内容变更/新增」与「删除」：2026-10-10 引入 app/desktop-app 整目录刷新后，
+  #   旧 dist 的哈希化资源被大量删除，而 git diff --name-only 会把删除项也列出来 → 对删除项 cp
+  #   直接 "cp: cannot stat ..." 让整个构建挂掉（CI run 38014730673 实测）。
+  CHANGED_FILES="$(git diff --name-only --diff-filter=ACMR "$PREV_TAG" HEAD -- app/ 2>/dev/null || true)"
+  DELETED_FILES="$(git diff --name-only --diff-filter=D  "$PREV_TAG" HEAD -- app/ 2>/dev/null || true)"
+  if [ -n "$CHANGED_FILES" ] || [ -n "$DELETED_FILES" ]; then
     INC_STAGE="$BUILD_DIR/inc-stage"
     rm -rf "$INC_STAGE"
     mkdir -p "$INC_STAGE"
-    for f in $CHANGED_FILES; do
-      case "$f" in
-        app/server/*)            DEST="$INC_STAGE/server/$(basename "$f")" ;;
-        app/desktop-app/*)       DEST="$INC_STAGE/desktop-app/${f#app/desktop-app/}" ;;
-        app/hermes-src/*)        DEST="$INC_STAGE/hermes-src/${f#app/hermes-src/}" ;;
-        app/config/*)            DEST="$INC_STAGE/config/${f#app/config/}" ;;
-        app/ui/*)                DEST="$INC_STAGE/ui/$(basename "$f")" ;;
-        app/VERSION)             DEST="$INC_STAGE/VERSION" ;;
-        *)                       DEST="$INC_STAGE/$(basename "$f")" ;;
+    # 部署相对路径映射（保留子目录结构；注意 $f 里的路径已含 app/ 前缀，直接剥掉前缀最稳）
+    inc_dest() {
+      case "$1" in
+        app/server/*)      echo "server/${1#app/server/}" ;;
+        app/desktop-app/*) echo "desktop-app/${1#app/desktop-app/}" ;;
+        app/hermes-src/*)  echo "hermes-src/${1#app/hermes-src/}" ;;
+        app/config/*)      echo "config/${1#app/config/}" ;;
+        app/ui/*)          echo "ui/${1#app/ui/}" ;;
+        app/VERSION)       echo "VERSION" ;;
+        *)                 basename "$1" ;;
       esac
+    }
+    for f in $CHANGED_FILES; do
+      if [ ! -f "$f" ]; then
+        echo "  ⚠ 跳过当前树中不存在的文件（改名/删除）: $f"
+        continue
+      fi
+      DEST="$INC_STAGE/$(inc_dest "$f")"
       mkdir -p "$(dirname "$DEST")"
       cp "$f" "$DEST"
     done
+    if [ -n "$DELETED_FILES" ]; then
+      # 应用侧（monitor 的 /api/app/hot-patch）是「解压覆盖」，不会删除文件；
+      # 这些残留只占磁盘（浏览器只请求新 index.html 引用的新哈希资源），故仅记录不阻断。
+      N_DEL="$(printf '%s\n' "$DELETED_FILES" | wc -l)"
+      echo "  · 上一版有 $N_DEL 个文件被删除（残留不影响功能，仅占磁盘）:"
+      printf '%s\n' "$DELETED_FILES" | head -3 | sed 's/^/      /'
+    fi
     tar czf "$DIST/incremental-${PREV_VERSION}-to-${CUR_VERSION}.tar.gz" -C "$INC_STAGE" .
     echo "✓ 增量包: incremental-${PREV_VERSION}-to-${CUR_VERSION}.tar.gz"
   else
