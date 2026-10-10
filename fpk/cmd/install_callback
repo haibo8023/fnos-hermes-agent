@@ -406,6 +406,22 @@ if [ "${SKIP_INSTALL}" = "false" ]; then
         #   新（2026-10-10 起）: 根部 venv/ + python/（自带 CPython ≥3.12 解释器）
         #   旧                : 根部即 venv 内容（依赖系统 Python 3.11）
         # 上游运行时自 0.21.6 起需要 Python ≥3.12（PEP 649 延迟注解等），旧布局已不适用。
+        # ── 属主自愈（2026-10-10 实测踩坑）──────────────────────────────────
+        # 若 ${DATA_DIR} 下存在非应用属主的文件（历史手工部署 / 以 root 执行过 uv、pip 等），
+        # 则上面的 `rm -rf` 静默失败、下面的 `tar xzf` 会因无法覆盖/utime 而整体失败：
+        #   tar: python/.../__pycache__/x.cpython-314.pyc: Cannot open: File exists
+        #   tar: python/.../__pycache__: Cannot utime: Operation not permitted
+        #   → 安装回调报「脚本出错(L412)」、升级中断（应用停在 start 状态）。
+        # 应用用户对 chown 有 sudo 免密白名单，这里先纠正属主再解压。
+        _foreign="$(find "${DATA_DIR}" ! -user "$(id -u)" -print 2>/dev/null | head -1)"
+        if [ -n "${_foreign}" ]; then
+            log_msg "⚠ 检测到 ${DATA_DIR} 存在非应用属主文件（例：${_foreign}），先自愈属主 ..."
+            if sudo -n chown -R "$(id -u):$(id -g)" "${DATA_DIR}" 2>>"${LOG_FILE}"; then
+                log_msg "属主自愈完成；剩余非属主文件数: $(find "${DATA_DIR}" ! -user "$(id -u)" 2>/dev/null | wc -l)"
+            else
+                log_msg "✗ 属主自愈失败（sudo chown 不可用）；如升级失败请手动执行 chown -R hermes-agent:hermes-agent ${DATA_DIR}"
+            fi
+        fi
         if tar tzf "${APP_DIR}/venv-bundle.tar.gz" 2>/dev/null | grep -q '^venv/'; then
             log_msg "检测到新布局 bundle（venv/ + python/），解压到 ${DATA_DIR} ..."
             rm -rf "${VENV_DIR}" "${DATA_DIR}/python" 2>/dev/null || true
