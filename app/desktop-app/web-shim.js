@@ -783,6 +783,8 @@
   var SHIM_ABSENT = (function () {
     var m = {};
     ['git', 'terminal', 'petOverlay', 'hud', 'hudModifier', 'quickEntry', 'wakeIndicator', 'updateHold', 'uninstall', 'mcpOauth', 'freeTierChallenge', 'minimizeToTray', 'windowControls', 'windowRelay', 'chatOnboarding', 'capturePreview', 'screenshot'].forEach(function (k) { m[k] = 1; });
+    // 供 CI 桥面检查（scripts/desktop-app/check-bridge-surface.py）读取
+    try { window.__HERMES_SHIM_ABSENT__ = m; } catch (e) {}
     return m;
   })();
   (function () {
@@ -809,6 +811,7 @@
         setLaunchMode: function () { return ok(); },
         setLastUsed: function () { return ok(); },
         test: function (cfg) { return core.testConnectionConfig(cfg || {}); },
+        updateManaged: null,   // 官方：不支持托管更新时为 null（前端用 `?? null` 判存在）
         updateAll: function () { return Promise.resolve({ ok: false, error: 'web: 托管更新不可用' }); },
         onChanged: unsub,
       },
@@ -840,6 +843,7 @@
       },
       zoom: {
         get: function () { return ok(1); },
+        factor: function () { return 1; },   // 前端：`zoom.factor?.() || 1`
         setPercent: noop,
         onChanged: unsub,
       },
