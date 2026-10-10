@@ -123,9 +123,14 @@ def _request(url: str, accept: str = "application/vnd.github+json") -> str:
         return _request_with(url, accept, token)
     except urllib.error.HTTPError as exc:
         if token is None or exc.code != 401:
+            exc.hermes_authenticated = token is not None  # which quota a 403/429 spent
             raise
         logger.debug("GitHub rejected the configured token; retrying anonymously")
+    try:
         return _request_with(url, accept, None)
+    except urllib.error.HTTPError as exc:
+        exc.hermes_authenticated = False
+        raise
 
 
 def _request_with(url: str, accept: str, token: str | None) -> str:
@@ -448,9 +453,22 @@ def main() -> None:
     parser.add_argument("--cache-path", type=Path)
     parser.add_argument("--branch-config-path", type=Path)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--set-channel", type=validate_name,
+                        help="Persist this install's channel (the Desktop selector), then report as usual.")
     args = parser.parse_args()
     with contextlib.redirect_stdout(sys.stderr):
-        result = check_for_updates(**vars(args))
+        if args.set_channel:
+            from hermes_constants import set_hermes_home_override
+            from hermes_cli.update_channel import set_install_channel
+
+            # The record belongs in the --home profile's config.yaml, as the check reads it.
+            set_hermes_home_override(args.home)
+            set_install_channel(args.set_channel, args.install_root)
+            args.force = True
+        result = check_for_updates(**{k: v for k, v in vars(args).items() if k != "set_channel"})
+    if isinstance(result, dict):
+        # Older runtimes reject --set-channel; Desktop offers its selector only on this flag.
+        result["channelSelectable"] = True
     print(json.dumps(result))
 
 

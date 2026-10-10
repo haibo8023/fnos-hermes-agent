@@ -1,0 +1,1 @@
+import{S as e}from"./updates-DD6zyaba.js";export{e as openUpdatesWindow};
