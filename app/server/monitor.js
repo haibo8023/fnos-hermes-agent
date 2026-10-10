@@ -5105,7 +5105,7 @@ async function handleFetch(req) {
           throw new Error("安装包不完整（缺少 hermes-src/ui/server 核心组件），已中止更新；请改用完整版安装包");
         }
         // 覆盖应用目录（bin/server/ui/hermes-src/package.json 等；config 为 fnOS 只读模板不覆盖）
-        execSync(`cp -rf ${stage}/bin ${stage}/server ${stage}/ui ${stage}/hermes-src ${stage}/package.json ${APP_DIR}/ 2>/dev/null; true`, { timeout: 600000, encoding: "utf8" });
+        execSync(`cp -rf ${stage}/bin ${stage}/server ${stage}/ui ${stage}/hermes-src ${stage}/desktop-app ${stage}/package.json ${APP_DIR}/ 2>/dev/null; true`, { timeout: 600000, encoding: "utf8" });
         // 更新 fnOS 应用壳 manifest（sudo cp 免密白名单已配置）
         try { execSync(`sudo -n cp ${stage}/manifest /var/apps/hermes-agent/manifest && sudo -n chown root:root /var/apps/hermes-agent/manifest 2>/dev/null; true`, { timeout: 15000 }); } catch {}
         execSync(`rm -rf ${stage}`, { timeout: 30000 });
@@ -5114,6 +5114,10 @@ async function handleFetch(req) {
         throw new Error("解包覆盖失败: " + e.message);
       }
       // 清除版本缓存：确保 UI 显示新版本（VERSION_OVERRIDE_FILE 残留会导致显示旧版本）
+      // 注意：_appVer 必须在下面那句之前就已经算好 —— 之前它声明在函数后段（const），
+      // 这里提前引用命中 TDZ，VERSION 文件永远写不进去（2026-10-10 实测日志：
+      // "[app-update] VERSION 文件写入失败: Cannot access '_appVer' before initialization"）。
+      const _appVer = String(version || "").replace(/^fnos-hermes-agent_v|^v/, "") || APP_VERSION || "";
       try { unlinkSync(VERSION_OVERRIDE_FILE); } catch {}
       try { writeFileSync(`${APP_DIR}/VERSION`, _appVer + "\n", { mode: 0o644 }); } catch (e4) { log(`[app-update] VERSION 文件写入失败: ${e4.message}`); }
       // readAppVersion 优先读 APP_DIR/manifest（VERSION 文件不参与版本显示），
@@ -5128,7 +5132,7 @@ async function handleFetch(req) {
       try { HERMES_VERSION = "unknown"; } catch {}
       try { APP_VERSION = readAppVersion(); } catch {}
       // 同步 fnOS 应用中心版本记录（postgres appcenter.app 表）——应用中心 UI 显示版本与 manifest 一致
-      const _appVer = String(version || "").replace(/^fnos-hermes-agent_v|^v/, "");
+      // （_appVer 已在上面提前声明，这里不再重复 const 声明）
       if (_appVer) {
         try {
           execSync(`sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c "UPDATE app SET version='${_appVer}' WHERE app_name='hermes-agent'" 2>&1`, { timeout: 15000 });
