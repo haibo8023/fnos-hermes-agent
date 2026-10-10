@@ -92,6 +92,11 @@ python3 "$ROOT/scripts/desktop-app/apply-overlay.py" \
 # 静态资源要给应用用户可读（否则 monitor 读不了 → 500 → shim 加载失败，renderer 报 IPC bridge 不可用）
 chmod -R a+rX "$TARGET" 2>/dev/null || true
 
+# 桥面检查（warn-only）：上游前端新增了我们既未实现、也不在 ABSENT 清单里的桥能力时打 ::warning::
+# 这样上游前端改接口不会悄悄弄坏 web 版，而是在 CI 里显式报出来（详见 fnos-learned §6.18）
+python3 "$ROOT/scripts/desktop-app/check-bridge-surface.py" \
+  --dist "$TARGET" --shim "$ROOT/overlay/desktop-app/web-shim.js" || true
+
 echo "── 结果（变更文件）"
 git -C "$ROOT" status --porcelain app/desktop-app 2>/dev/null | head -30 || true
 echo "✓ desktop dist 刷新完成：$TARGET"
