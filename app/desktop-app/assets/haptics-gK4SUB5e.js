@@ -1,1 +1,0 @@
-import{t as e}from"./atom-DPaP1HVd.js";import{l as t,r as n}from"./storage-Qfg3Ykci.js";var r=`hermes.desktop.hapticsMuted`,i=e(t(r,!1));i.subscribe(e=>n(r,e));export{i as t};

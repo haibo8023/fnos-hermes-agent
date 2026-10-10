@@ -744,6 +744,9 @@
 
   var proxied = new Proxy(core, {
     get: function (obj, prop) {
+      // Electron 专属命名空间：必须"不存在"（放在最前，覆盖 pristine 里为旧前端准备的空实现），
+      // 新前端靠 `if (!d.git?.worktreeList) return` 做能力探测
+      if (typeof prop === "string" && SHIM_ABSENT[prop]) return undefined;
       if (prop in obj) return obj[prop];
       if (prop in nested) return nested[prop];
       // 事件订阅方法(onXxx):返回"取消函数"(同步),renderer 用 const unsub = desktop.onXxx(cb); unsub()
@@ -770,6 +773,129 @@
     }
   });
 
+
+  /* ═══ official-namespaced-bridge (fnOS web shim) ═══ */
+  // 上游新前端把桥改成命名空间式（connections/profile/settings/updates/… 24 组，官方定义在
+  // apps/desktop/electron/preload.ts）。两个关键点：
+  //   1) 新前端用「方法是否存在」判能力（如 `if (!d.git?.worktreeList) return`），
+  //      所以 Electron 专属能力必须真的不存在（undefined），否则代码路径被激活后因形状不符崩溃；
+  //   2) web 真正需要的命名空间按官方签名实现，返回 web 语义的数据。
+  var SHIM_ABSENT = (function () {
+    var m = {};
+    ['git', 'terminal', 'petOverlay', 'hud', 'hudModifier', 'quickEntry', 'wakeIndicator', 'updateHold', 'uninstall', 'mcpOauth', 'freeTierChallenge', 'minimizeToTray', 'windowControls', 'windowRelay', 'chatOnboarding', 'capturePreview', 'screenshot'].forEach(function (k) { m[k] = 1; });
+    return m;
+  })();
+  (function () {
+    function ok(v) { return Promise.resolve(v === undefined ? { ok: true } : v); }
+    function noop() { return Promise.resolve(undefined); }
+    function unsub() { return function () {}; }
+    function offline() { return Promise.resolve({ ok: false, error: 'web: not supported' }); }
+    function localConnection() {
+      return {
+        id: 'local', kind: 'local', mode: 'local',
+        profile: CONFIG.profile || 'default',
+        baseUrl: base, token: token, authMode: 'token', source: 'env',
+        isFullscreen: false, nativeOverlayWidth: 0, windowButtonPosition: null,
+        launchMode: 'local', lastUsedAt: null, managed: false,
+      };
+    }
+    var ns = {
+      // 连接：web 只有内置本机连接（官方 Electron 可多条 + 托管更新）
+      connections: {
+        list: function () { return ok({ connections: [localConnection()], primaryId: 'local' }); },
+        save: function () { return ok({ connections: [localConnection()], primaryId: 'local' }); },
+        remove: function () { return Promise.resolve({ ok: false, error: 'web: 内置连接不可删除' }); },
+        setPrimary: function () { return ok({ primaryId: 'local' }); },
+        setLaunchMode: function () { return ok(); },
+        setLastUsed: function () { return ok(); },
+        test: function (cfg) { return core.testConnectionConfig(cfg || {}); },
+        updateAll: function () { return Promise.resolve({ ok: false, error: 'web: 托管更新不可用' }); },
+        onChanged: unsub,
+      },
+      profile: {
+        getDefault: function () { return ok(CONFIG.profile || 'default'); },
+        setDefault: function (n) { return ok({ profile: n || CONFIG.profile || 'default' }); },
+        get: function (n) {
+          var name = n || CONFIG.profile || 'default';
+          return ok({ name: name, profile: name, display_name: '', is_default: true });
+        },
+        remember: function () { return ok(); },
+        set: function () { return ok(); },
+        onDefaultChanged: unsub,
+      },
+      settings: {
+        getDefaultProjectDir: function () { return ok({ dir: '' }); },
+        setDefaultProjectDir: function (d) { return ok({ dir: String(d || '') }); },
+        pickDefaultProjectDir: function () { return ok({ dir: '' }); },
+      },
+      updates: {
+        check: function () { return ok({ upToDate: true, available: null }); },
+        apply: offline,
+        getBranch: function () { return ok(CONFIG.branch || 'main'); },
+        setBranch: noop,
+        onProgress: unsub,
+        takePendingRun: function () { return ok(null); },
+        ackPendingRun: noop,
+        onPendingRun: unsub,
+      },
+      zoom: {
+        get: function () { return ok(1); },
+        setPercent: noop,
+        onChanged: unsub,
+      },
+      cloud: {
+        status: function () { return ok({ loggedIn: false, connected: false, agents: [] }); },
+        login: offline, logout: noop, discover: offline, agentSignIn: offline,
+      },
+      dataUrlReadMax: { get: function () { return ok(0); }, set: noop },
+      desktopMetrics: { setEnabled: noop, takeRendererCrashes: function () { return ok([]); }, ackRendererCrashes: noop },
+      themes: {
+        fetchMarketplace: function () { return ok({ themes: [] }); },
+        searchMarketplace: function () { return ok({ themes: [] }); },
+      },
+    };
+    Object.keys(ns).forEach(function (k) { core[k] = ns[k]; });
+
+    // 官方 preload 的非函数标志（web 环境一律降级）
+    core.glassSupported = false;
+    core.translucencySupported = false;
+    core.localModelsEnabled = false;
+    core.guestOnboardingEnabled = false;
+    core.localSkin = null;
+
+    // 新前端用到的扁平方法（缺了会因 `desktop.foo?.().field` 之类抛 TypeError，必须给形状）
+    var extra = {
+      getBootstrapState: function () {
+        // 形状照上游默认态 RQ（缺 log/stages 会让安装浮层读 r.log.length 抛错）
+        return ok({
+          active: false, manifest: null, stages: {}, error: null, log: [],
+          startedAt: null, completedAt: null, setupChoice: null, unsupportedPlatform: null, bundled: false,
+        });
+      },
+      probeLocalBackend: function () {
+        return ok({ available: true, reachable: true, running: true, ready: true, bootstrapNeeded: false });
+      },
+      getSyncStatus: function () { return ok({ headline: null, level: 'info', syncing: false }); },
+      getRecentLogs: function () { return ok({ lines: [] }); },
+      getMachineProfile: function () { return ok({ locale: null, platform: 'linux', arch: 'x64' }); },
+      getRemoteDisplayReason: function () { return ok(null); },
+      getVersion: function () { return ok({ version: CONFIG.appVersion || '', branch: CONFIG.branch || 'main', sha: CONFIG.sha || '' }); },
+      getPoolLimits: function () { return ok({ maxBackends: 0, idleMs: 0 }); },
+      getSecretStorageEncryption: function () { return ok({ on: false }); },
+      getOnBattery: function () { return ok(false); },
+      logsRoot: function () { return Promise.resolve(CONFIG.home || ''); },
+      getBootProgress: function () { return ok({}); },
+      continueBootstrapLocal: ok, cancelBootstrap: noop, resetBootstrap: noop, repairBootstrap: noop,
+      recycleBackend: ok, setPoolLimits: noop, setSecretStorageEncryption: noop,
+      setNativeTheme: noop, setTitleBarTheme: noop, setWindowState: noop, setActiveWork: noop, setKeepAwake: noop,
+      logLine: noop, revealLogs: noop, reportRendererError: noop, relaunchApp: noop,
+      normalizePreviewTarget: function () { return ok(null); },
+      reachPreviewUrl: function (u) { return ok(u || null); },
+      resolveFavicon: function () { return ok(null); },
+      fetchLinkTitle: function () { return ok(''); },
+    };
+    Object.keys(extra).forEach(function (k) { if (!(k in core)) core[k] = extra[k]; });
+  })();
   window.hermesDesktop = proxied;;
   window.__HERMES_WEB_SHIM_LOADED__ = true;
 })();

@@ -1,1 +1,0 @@
-import{z as e}from"./i18n-BTdSjHGh.js";var t=e(`outline`,`clock`,`Clock`,[[`path`,{d:`M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0`,key:`svg-0`}],[`path`,{d:`M12 7v5l3 3`,key:`svg-1`}]]),n=e(`outline`,`mail`,`Mail`,[[`path`,{d:`M3 7a2 2 0 0 1 2 -2h14a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-10`,key:`svg-0`}],[`path`,{d:`M3 7l9 6l9 -6`,key:`svg-1`}]]);export{t as n,n as t};

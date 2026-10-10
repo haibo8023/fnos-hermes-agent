@@ -1,1 +1,0 @@
-var e={dark:`github-dark-dimmed`,light:`github-light-default`},t={"github-light-default":{"#6e7781":`#57606a`}},n=`hermes-shiki-v1:${JSON.stringify({dark:e.dark,light:e.light,colorReplacements:t})}`;export{n,e as r,t};

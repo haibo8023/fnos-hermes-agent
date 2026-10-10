@@ -1,1 +1,0 @@
-import{t as e}from"./atom-DPaP1HVd.js";var t=e(null);function n(e){return r(!1),new Promise(n=>{t.set({...e,resolve:n})})}function r(e){let n=t.get();n&&(t.set(null),n.resolve(e))}export{n,r,t};

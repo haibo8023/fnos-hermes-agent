@@ -1,0 +1,1 @@
+import{i as e}from"./connection-registry-state-C4MY4T6q.js";var t=e(typeof window<`u`&&window.hermesDesktop?.localModelsEnabled===!0);export{t};

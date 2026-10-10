@@ -1,0 +1,1 @@
+var e=new WeakMap;function t(t,n){return e.set(t,n),()=>{e.get(t)===n&&e.delete(t)}}function n(t,n,r){return t instanceof HTMLCanvasElement?e.get(t)?.openNodeMenuAt(n,r)??!1:!1}export{t as n,n as t};

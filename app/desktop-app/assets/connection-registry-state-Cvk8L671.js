@@ -1,1 +1,0 @@
-import{r as e}from"./rolldown-runtime-C_s2cVnS.js";import{t}from"./atom-DPaP1HVd.js";var n=e({$connectionsRegistry:()=>r,hasRegistryTopology:()=>i}),r=t(null);function i(){return r.get()!==null||!!window.hermesDesktop?.connections?.list}export{n,i as r,r as t};

@@ -1,0 +1,1 @@
+import{c as e}from"./i18n-BjYccvcK.js";var t=null,n=null;function r(e){return t=e,()=>{t===e&&(t=null)}}function i(e){if(n)return n;let r=t;return r?(n=Promise.resolve().then(()=>r(e)).finally(()=>{n=null}),n):Promise.reject(Error(`Gateway reconnect is unavailable`))}function a(){return{label:e(`prompts.reconnect`),onClick:()=>void i().catch(()=>void 0)}}export{i as n,r,a as t};

@@ -1,0 +1,1 @@
+var e=[`helpful`,`concise`,`technical`,`creative`,`teacher`,`kawaii`,`catgirl`,`pirate`,`shakespeare`,`surfer`,`noir`,`uwu`,`philosopher`,`hype`],t=new Set([``,`none`,`default`,`neutral`]);function n(e){let n=String(e??``).trim().toLowerCase();return t.has(n)?``:n}export{n,e as t};
