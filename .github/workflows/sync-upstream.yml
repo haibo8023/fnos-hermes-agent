@@ -97,11 +97,32 @@ jobs:
             git checkout -- VERSION
           fi
 
+      # ── 刷新 app/desktop-app：从本次 upstream checkout 构建 desktop renderer 的 web dist，
+      #    同步进 app/desktop-app 再叠加 overlay/desktop-app（web-shim 层）。
+      #    app/desktop-app 是官方 dist 的整份拷贝，而上游同步（merge-upstream.js）只覆盖 app/hermes-src，
+      #    所以桌面端必须在这里单独刷新，否则会一直停在入库那天的旧前端（2026-10-10 的
+      #    「恢复失败 session not found」弹窗就是旧 dist 引起的）。
+      #    构建失败只告警、保留旧 dist，不阻断上游同步。
+      #    ⚠ 默认关闭：开关 = 仓库变量 DESKTOP_DIST_REFRESH=true。
+      #      原因：新 dist 需要把 web-shim 升到官方命名空间式桥（hermesDesktop.connections/profile/settings…），
+      #      否则 renderer 直接进错误边界（实测 "Something broke in the interface"）。shim 适配完成后再开。
+      - name: Setup Node for desktop dist
+        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Refresh desktop dist (upstream renderer + overlay)
+        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        run: |
+          bash scripts/desktop-app/sync-dist.sh --upstream upstream --target app/desktop-app
+
       # 先提交合并结果（build.sh 增量包 diff 需要 HEAD 包含合并）
       - name: Commit sync & merge
         if: steps.check.outputs.changed == 'true'
         run: |
-          git add VERSION .upstream-state app/hermes-src scripts/merge-upstream.js
+          git add VERSION .upstream-state app/hermes-src scripts/merge-upstream.js \
+                  app/desktop-app overlay scripts/desktop-app
           git commit -m "sync: 上游 ${{ steps.version.outputs.version }} 受控合并（保留移植修改）" --allow-empty || true
 
       # venv-bundle（约 70MB，不提交仓库）
@@ -156,7 +177,14 @@ jobs:
           [ -f "$FPK" ] || { echo "✗ 未找到 $FPK" >&2; exit 1; }
           rm -rf /tmp/verify-pkg && mkdir -p /tmp/verify-pkg && cd /tmp/verify-pkg
           tar xzf "$FPK" app.tgz
-          tar xzf app.tgz ./config/bootstrap/hermes-version.env ./hermes-src/hermes_platform/__init__.py
+          tar xzf app.tgz ./config/bootstrap/hermes-version.env ./hermes-src/hermes_platform/__init__.py \
+            ./desktop-app/index.html ./desktop-app/web-shim.js
+          # desktop-app 必须带着 overlay（web-shim 注入），否则门户里桌面端直接坏
+          grep -q 'web-shim.js?v=' ./desktop-app/index.html \
+            || { echo "✗ 包内 desktop-app/index.html 缺少 web-shim 注入" >&2; exit 1; }
+          grep -q 'window.hermesDesktop' ./desktop-app/web-shim.js \
+            || { echo "✗ 包内 desktop-app/web-shim.js 不是预期的 shim 桥" >&2; exit 1; }
+          echo "✓ 包内 desktop-app 带 overlay（web-shim 已注入）"
           WANT="$(cut -d. -f1-3 "$GITHUB_WORKSPACE/VERSION")"
           grep -qx "HERMES_VERSION=$WANT" ./config/bootstrap/hermes-version.env \
             || { echo "✗ hermes-version.env 版本不符（期望 $WANT）:" >&2; cat ./config/bootstrap/hermes-version.env >&2; exit 1; }
