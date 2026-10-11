@@ -1,0 +1,1 @@
+import{t as e}from"./preview-act-DdHS9iPy.js";export{e as actOnActivePreview};

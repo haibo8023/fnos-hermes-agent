@@ -1,0 +1,1 @@
+import{S as e}from"./updates-DsieSoQl.js";export{e as openUpdatesWindow};
