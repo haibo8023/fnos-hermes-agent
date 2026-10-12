@@ -1,1 +1,0 @@
-import{S as e}from"./updates-DtOwDi3J.js";export{e as openUpdatesWindow};
