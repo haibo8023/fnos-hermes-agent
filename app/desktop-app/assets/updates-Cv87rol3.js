@@ -1,1 +1,0 @@
-import{S as e}from"./updates-BGXGWr86.js";export{e as openUpdatesWindow};
