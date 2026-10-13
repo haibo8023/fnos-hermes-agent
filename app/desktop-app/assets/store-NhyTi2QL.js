@@ -1,0 +1,1 @@
+import{i as e}from"./connection-registry-state-C4MY4T6q.js";import{Ci as t,ki as n}from"./i18n-Ce84XUcD.js";import{g as r}from"./panes-BMhneon2.js";var i=`hermes.desktop.terminalTakeover`,a=e(n(i,!1));a.subscribe(e=>t(i,e));var o=r(`terminalOpen`,a,e=>a.set(e)),s=e=>o.set(e),c=e(null),l=e=>{let t=e.trim();t&&(s(!0),c.set(t))};export{s as i,o as n,l as r,c as t};

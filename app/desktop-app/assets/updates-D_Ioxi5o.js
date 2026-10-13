@@ -1,1 +1,0 @@
-import{S as e}from"./updates-CHzY96pd.js";export{e as openUpdatesWindow};
