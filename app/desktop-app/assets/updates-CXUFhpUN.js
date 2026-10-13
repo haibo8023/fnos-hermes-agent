@@ -1,1 +1,0 @@
-import{S as e}from"./updates-BUJPEFrk.js";export{e as openUpdatesWindow};
