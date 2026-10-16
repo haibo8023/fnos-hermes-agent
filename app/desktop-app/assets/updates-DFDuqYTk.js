@@ -1,1 +1,0 @@
-import{S as e}from"./updates-Dv97EGMV.js";export{e as openUpdatesWindow};
