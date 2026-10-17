@@ -1,0 +1,1 @@
+import{S as e}from"./updates-Bx2ssbt3.js";export{e as openUpdatesWindow};
