@@ -1,0 +1,1 @@
+import{S as e}from"./updates-DMDG9_4m.js";export{e as openUpdatesWindow};
