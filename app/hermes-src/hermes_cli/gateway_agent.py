@@ -649,10 +649,14 @@ class GatewayAgent:
     def _take_turn_route(self):
         """The ``/model --once`` pick for the admission being built, consumed here: one admission carries
         it, even when a later ``run_conversation`` submits while this one's ``prompt.submit`` still blocks.
-        A refusal that admitted nothing (``session_busy``) puts it back with ``_give_back_turn_route``."""
+        A refusal that admitted nothing (``session_busy``) puts it back with ``_give_back_turn_route``.
+
+        Staging already compared the pick with the session's route (``_route_off_session``), so it is not
+        compared again: its ``model`` may be an alias spelled like the session's model, and the owner runs a
+        plain pick of the session's own route on the session's endpoint and key (``one_turn_runtime``)."""
         pending, reasoning = self._turn_route, self._turn_reasoning
         self._turn_route = self._turn_reasoning = self._taken_turn_route = None
-        if not pending or not self._route_off_session(**pending):
+        if not pending:
             return None
         self._taken_turn_route = (pending, reasoning)
         return {**pending, **({"reasoning": reasoning} if reasoning else {})}
@@ -695,8 +699,10 @@ class GatewayAgent:
         adopted = take_admitted_turn(self, persist_user_message if isinstance(persist_user_message, str)
                                      else user_message)
         if adopted is not None:
-            # A notification turn the gateway already admitted and is running (its frames are queued).
+            # A turn the gateway already admitted and is running (its frames are queued). A recovered
+            # ``/queue`` turn missed some frames: its reply is completed from the receipt.
             receipt = adopted
+            turn.gapped = bool(adopted.get("recovered"))
         else:
             self._drain_stale()
             self._taken_turn_route = None
@@ -730,7 +736,8 @@ class GatewayAgent:
             self._generation = receipt["execution_generation"]
         starts: dict = {}
         try:
-            outcome = self._pump(stream_callback, starts, turn)
+            settled = (adopted or {}).get("receipt")
+            outcome = {"_receipt": settled} if settled else self._pump(stream_callback, starts, turn)
         finally:
             if self._owns(turn):
                 self._generation_done()
@@ -745,7 +752,9 @@ class GatewayAgent:
         return result
 
     def _drain_stale(self):
-        """Frames left from an earlier turn of this viewer (a late settlement) are not this turn's."""
+        """Frames left from an earlier turn of this viewer (a late settlement) are not this turn's. A
+        ``/queue`` admission's start among them is remembered: that turn is painted after this one."""
+        from hermes_cli.gateway_tools_notify import missed_start
         while True:
             try:
                 frame = self.connection.events.get_nowait()
@@ -756,6 +765,9 @@ class GatewayAgent:
                     continue  # a connection a reconnect already replaced
                 self.connection.events.put(frame)
                 return
+            params = frame.get("params") if isinstance(frame, dict) else None
+            if isinstance(params, dict) and params.get("session_id") == self.session_id:
+                missed_start(self._state(), params)
 
     def _generation_done(self):
         self._generation = None
@@ -803,6 +815,8 @@ class GatewayAgent:
             kind, payload = params.get("type"), params.get("payload") or {}
             admission = params.get("admission_id") or (payload.get("admission_id") if isinstance(payload, dict) else None)
             if self._admission and admission and admission != self._admission:
+                from hermes_cli.gateway_tools_notify import missed_start
+                missed_start(self._state(), params)  # a /queue turn run ahead of this one: painted after it
                 continue
             if params.get("execution_generation") is not None:
                 self._generation = params["execution_generation"]
@@ -927,8 +941,10 @@ class GatewayAgent:
         diff = payload.get("inline_diff")
         if isinstance(diff, str) and diff:
             from cli import _cprint
+            from hermes_cli.cli_modern_layout import diff_printer
+            emit = diff_printer(_cprint)
             for line in diff.rstrip("\n").splitlines():
-                _cprint(line)
+                emit(line)
             if name == "delegate_task" and self.tool_complete_callback is not None:
                 self.tool_complete_callback(call_id, name, args, result)
         elif self.tool_complete_callback is not None:
@@ -1145,7 +1161,11 @@ class GatewayAgent:
             return out
         self._session_messages = out["messages"]
         calls = stored.get("api_calls")
-        self._turn_api_calls = calls if isinstance(calls, int) and not isinstance(calls, bool) else None
+        # An interrupted turn's own count includes the attempt Ctrl-C cut off (the agent counts a call
+        # before the request goes out). Only a response prices the ask: fall back to the gateway's
+        # cumulative count, which moves per response, so an unanswered ask stays main's ``~`` estimate.
+        counted = isinstance(calls, int) and not isinstance(calls, bool) and not out.get("interrupted")
+        self._turn_api_calls = calls if counted else None
         self._apply_usage(stored, usage, turn)
         return out
 

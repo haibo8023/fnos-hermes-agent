@@ -1,0 +1,1 @@
+import{t as e}from"./preview-act-DXPou2DS.js";export{e as actOnActivePreview};
