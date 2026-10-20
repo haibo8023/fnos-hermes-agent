@@ -1,0 +1,1 @@
+import{S as e}from"./updates-C9FuafBa.js";export{e as openUpdatesWindow};
