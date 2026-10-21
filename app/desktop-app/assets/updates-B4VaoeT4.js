@@ -1,1 +1,0 @@
-import{S as e}from"./updates-CwSHVxHc.js";export{e as openUpdatesWindow};
