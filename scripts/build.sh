@@ -202,7 +202,10 @@ if [ -n "$PREV_VERSION" ] && [ "$PREV_TAG" != "v$CUR_VERSION" ]; then
       # 这些残留只占磁盘（浏览器只请求新 index.html 引用的新哈希资源），故仅记录不阻断。
       N_DEL="$(printf '%s\n' "$DELETED_FILES" | wc -l)"
       echo "  · 上一版有 $N_DEL 个文件被删除（残留不影响功能，仅占磁盘）:"
-      printf '%s\n' "$DELETED_FILES" | head -3 | sed 's/^/      /'
+      # 不能用 head：它读够 3 行就关闭管道 → printf 收到 SIGPIPE，
+      # 在 set -o pipefail 下整条流水线退出码 1，构建直接失败（2026-10-23 实测）。
+      # sed -n '1,3p' 会读完全部输入再输出前 3 行，不产生 SIGPIPE。
+      printf '%s\n' "$DELETED_FILES" | sed -n '1,3p' | sed 's/^/      /'
     fi
     tar czf "$DIST/incremental-${PREV_VERSION}-to-${CUR_VERSION}.tar.gz" -C "$INC_STAGE" .
     echo "✓ 增量包: incremental-${PREV_VERSION}-to-${CUR_VERSION}.tar.gz"
