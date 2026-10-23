@@ -22,7 +22,7 @@ SOCKET_PATH="${TRIM_APPDEST}/hermes-agent.sock"
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}; }
 
 start_process() {
-    if status; then return 0; fi
+    if status; then ensure_dashboard; return 0; fi
     if ! command -v node >/dev/null 2>&1; then log_msg "node not found"; return 1; fi
 
     # 修复权限漂移：确保数据/日志目录归属与 app 目录一致，防止 root/hermes-agent 混跑导致 EACCES
@@ -91,6 +91,28 @@ stop_process() {
     rm -f "${SOCKET_PATH}"
     log_msg "Stopped (incl. leftover cleanup)"
     return 0
+}
+
+# monitor 存活但 dashboard(9219) 已退出时的兜底拉起。
+# 否则 start 会因 status 为真直接 return，dashboard 永远不恢复（页面全 503）。
+ensure_dashboard() {
+    local DASH_PORT="${DASHBOARD_PORT:-9219}"
+    curl -s -o /dev/null -m 3 "http://127.0.0.1:${DASH_PORT}/" && return 0
+    local TOKEN_FILE="${TRIM_PKGVAR}/monitor.token"
+    if [ ! -r "${TOKEN_FILE}" ]; then log_msg "ensure_dashboard: monitor.token 缺失，跳过"; return 0; fi
+    local tok; tok=$(cat "${TOKEN_FILE}")
+    log_msg "monitor 在运行但 dashboard 未监听 ${DASH_PORT}，单独拉起 dashboard ..."
+    curl -s -m 15 -X POST -H "x-monitor-token: ${tok}" --unix-socket "${SOCKET_PATH}" \
+        http://localhost/api/dashboard/start >/dev/null 2>&1
+    local i
+    for i in $(seq 1 20); do
+        if curl -s -o /dev/null -m 2 "http://127.0.0.1:${DASH_PORT}/"; then
+            log_msg "dashboard 已拉起 (port ${DASH_PORT})"
+            return 0
+        fi
+        sleep 1
+    done
+    log_msg "dashboard 拉起失败（${DASH_PORT} 仍不可连）"
 }
 
 status() {

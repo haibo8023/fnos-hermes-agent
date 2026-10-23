@@ -10904,6 +10904,35 @@ async function handleFetch(req) {
       }
     }
     if (!_dbAlive) {
+      // ── 自愈（2026-10-24 修复）：Dashboard 进程彻底不在（非挂死）时此前直接返回 503，
+      // 而"自愈 502"逻辑写在 proxyDashboard() 的 catch 里——该分支永远走不到，
+      // 于是 dashboard 一旦退出，页面所有 API 永久 503，只能人工介入。
+      // 此处补一次拉起（10s 冷却防并发重复拉起），拉起成功后继续走代理。
+      if (Date.now() - lastDashboardHealTs > 10000) {
+        lastDashboardHealTs = Date.now();
+        log("[proxyDashboard] Dashboard 未运行，尝试自动拉起…");
+        try { unlinkSync(PID_DASHBOARD); } catch {}
+        try {
+          spawnHermes("dashboard", PID_DASHBOARD, ["dashboard", "--host", DASHBOARD_BIND, "--port", String(DASHBOARD_PORT), "--no-open", "--insecure"]);
+        } catch (e) {
+          log(`[proxyDashboard] Dashboard 自动拉起失败: ${e?.message || e}`);
+        }
+        // 等端口就绪（最多 12s，仅首次请求会慢，之后恢复正常）
+        const _healDeadline = Date.now() + 12000;
+        while (Date.now() < _healDeadline && !isPortListening(DASHBOARD_PORT)) {
+          await new Promise(r => setTimeout(r, 250));
+        }
+        try {
+          _dbAlive = isPortListening(DASHBOARD_PORT) || await portAlive(DASHBOARD_PORT);
+        } catch (e) { _dbAlive = false; }
+        if (_dbAlive) {
+          const foundDb = findPidByCmd("hermes dashboard", HERMES_BIN);
+          if (foundDb) { try { writeFileSync(PID_DASHBOARD, String(foundDb), "utf8"); } catch (e) {} }
+          log(`[proxyDashboard] Dashboard 已自动恢复（port ${DASHBOARD_PORT}）`);
+        }
+      }
+    }
+    if (!_dbAlive) {
       return new Response(JSON.stringify({ error: "Dashboard is not running" }), {
         status: 503,
         headers: { "Content-Type": "application/json" },
