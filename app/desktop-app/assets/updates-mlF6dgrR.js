@@ -1,0 +1,1 @@
+export{S as openUpdatesWindow}from"./updates-DgsyIA8e.js";

@@ -1,0 +1,1 @@
+export{Ia as code}from"./shiki-C5G1eB--.js";

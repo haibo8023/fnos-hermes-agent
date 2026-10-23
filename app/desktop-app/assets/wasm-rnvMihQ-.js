@@ -1,0 +1,1 @@
+export{ns as default}from"./shiki-C5G1eB--.js";
