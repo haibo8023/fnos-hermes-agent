@@ -8282,8 +8282,8 @@
     "file": "assets/profile-color-TXT65diY.js",
     "name": "profile-color"
   },
-  "_profile-ops-Kru101Zh.js": {
-    "file": "assets/profile-ops-Kru101Zh.js",
+  "_profile-ops-BfqslLSP.js": {
+    "file": "assets/profile-ops-BfqslLSP.js",
     "name": "profile-ops",
     "imports": [
       "_connection-registry-state-C4MY4T6q.js",
@@ -9625,7 +9625,7 @@
     ]
   },
   "index.html": {
-    "file": "assets/index-D18sxKb1.js",
+    "file": "assets/index-Do7zCbRh.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -9737,7 +9737,7 @@
       "_glyph-spinner-D714m4Cv.js",
       "_renderer-loop-pause-ajXSgtU7.js",
       "_profile-color-TXT65diY.js",
-      "_profile-ops-Kru101Zh.js",
+      "_profile-ops-BfqslLSP.js",
       "_diff-lines--YUJZROC.js",
       "_display-path-ljP0gNzP.js",
       "_preview-script-runner-DrYpYe7o.js",
@@ -10435,12 +10435,12 @@
     ]
   },
   "src/plugins/hermes-bots/profile-ops.ts": {
-    "file": "assets/profile-ops-GOBv2BIY.js",
+    "file": "assets/profile-ops-Qr98rFOy.js",
     "name": "profile-ops",
     "src": "src/plugins/hermes-bots/profile-ops.ts",
     "isDynamicEntry": true,
     "imports": [
-      "_profile-ops-Kru101Zh.js"
+      "_profile-ops-BfqslLSP.js"
     ]
   },
   "src/store/connection-registry-state.ts": {
