@@ -1,0 +1,1 @@
+export{t as GatewaySettings}from"./gateway-settings-MMudXAJQ.js";
