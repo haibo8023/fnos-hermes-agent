@@ -1,0 +1,1 @@
+export{S as openUpdatesWindow}from"./updates-DpVhjO5s.js";
