@@ -1,0 +1,1 @@
+export{Wc as default}from"./shiki-BbEOG7az.js";

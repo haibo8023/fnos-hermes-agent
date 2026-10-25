@@ -1,0 +1,1 @@
+import{o as e}from"./rolldown-runtime-C_s2cVnS.js";import{V as t,z as n}from"./vendor-react-BT_jfSDd.js";t();var r=e(n(),1);function i({className:e,type:t=`button`,...n}){return(0,r.jsx)(`button`,{className:e,"data-slot":`row-button`,type:t,...n})}export{i as t};

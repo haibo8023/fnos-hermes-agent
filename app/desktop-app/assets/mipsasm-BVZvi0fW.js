@@ -1,0 +1,1 @@
+export{Ic as default}from"./shiki-BbEOG7az.js";

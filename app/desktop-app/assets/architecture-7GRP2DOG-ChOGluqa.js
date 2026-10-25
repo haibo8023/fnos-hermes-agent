@@ -1,0 +1,1 @@
+export{Ot as createArchitectureServices}from"./mermaid-DMM1cgIo.js";

@@ -1,0 +1,1 @@
+export{xd as createJavaScriptRegexEngine}from"./shiki-BbEOG7az.js";
