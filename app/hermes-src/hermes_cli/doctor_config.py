@@ -309,6 +309,7 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
     """Resolve every routed ``auxiliary.<task>`` block through the real entry point the tasks use and report
     the ones that fail — an unresolvable block otherwise silently runs the task on the main model (#116055)."""
     from hermes_cli.config import read_user_config_raw
+    from hermes_cli.left_core_migration import provider_install_hint
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from utils import base_url_hostname
     aux = read_user_config_raw(config_path).get("auxiliary")
@@ -320,9 +321,11 @@ def _validate_auxiliary_config(config_path, issues: list) -> None:
         try:
             runtime = resolve_runtime_provider(requested=provider, target_model=model, explicit_api_key=api_key, explicit_base_url=base_url)
         except Exception as exc:
-            _fail_and_issue(f"auxiliary.{task}.provider '{provider}' does not resolve", f"({str(exc).splitlines()[0]})",
-                            f"auxiliary.{task}.provider '{provider}' cannot be resolved ({str(exc).splitlines()[0]}); the task "
-                            f"silently runs on the main model. Fix the provider name/credentials in auxiliary.{task}.", issues)
+            reason, moved = str(exc).splitlines()[0], provider_install_hint(provider or "")
+            _fail_and_issue(f"auxiliary.{task}.provider '{provider}' does not resolve", f"({reason})",
+                            f"auxiliary.{task}.provider '{provider}' cannot be resolved ({reason}); the task silently runs "
+                            f"on the main model. " + (moved or f"Fix the provider name/credentials in auxiliary.{task}."),
+                            issues)
             continue
         if not runtime.get("api_key") and not runtime.get("command"):
             check_warn(f"auxiliary.{task}.provider '{provider}' resolved without credentials", f"({runtime.get('provider')} @ {runtime.get('base_url')})")

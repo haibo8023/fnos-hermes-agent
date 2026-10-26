@@ -1,1 +1,0 @@
-export{t as GatewaySettings}from"./gateway-settings-Ctmw5qsn.js";
