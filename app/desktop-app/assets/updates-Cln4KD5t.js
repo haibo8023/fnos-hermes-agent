@@ -1,0 +1,1 @@
+export{S as openUpdatesWindow}from"./updates-BB4Xg8ZC.js";
