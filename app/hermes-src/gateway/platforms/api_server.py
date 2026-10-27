@@ -1501,21 +1501,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # -- Multi-profile multiplexing (/p/<profile>/...) --------------------------------
 
     def _resolve_request_profile(self, request: web.Request):
-        """Resolve + validate the /p/<profile>/ prefix: ``None`` (no prefix, or multiplexing
-        off and the prefix names this gateway's own profile), the served profile name, or
-        ``_PROFILE_REJECTED`` (-> 404). Fail closed: a foreign prefix must never be ignored."""
-        profile = (request.match_info.get("profile") or "").strip()
-        if not profile:
-            return None
-        cfg = getattr(self.gateway_runner, "config", None)
-        if not getattr(cfg, "multiplex_profiles", False):
-            return None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED
-        try:
-            from hermes_cli.profiles import profiles_to_serve
-            served = {name for name, _ in profiles_to_serve(multiplex=True)}
-        except Exception:
-            return _PROFILE_REJECTED
-        return profile if profile in served else _PROFILE_REJECTED
+        from gateway.platforms.api_server_profile_prefix import resolve_request_profile
+        return resolve_request_profile(self, request)
 
     @staticmethod
     def _profile_scope(profile: Optional[str]):
@@ -1553,7 +1540,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         async def profile_prefix_middleware(request: web.Request, handler):
             profile = self._resolve_request_profile(request)
             if profile is _PROFILE_REJECTED:
-                return web.json_response({"error": "Unknown or unconfigured profile"}, status=404)
+                from gateway.platforms.api_server_profile_prefix import rejection_response
+                return rejection_response(request)
             token = _api_request_profile.set(profile)
             try:
                 with self._profile_scope(profile):
