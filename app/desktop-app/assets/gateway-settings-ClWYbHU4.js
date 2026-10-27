@@ -1,1 +1,0 @@
-export{t as GatewaySettings}from"./gateway-settings-uVTn0lFQ.js";

@@ -1,1 +1,0 @@
-export{bt as CapabilitiesView}from"./sdk-DYfrt_aT.js";
