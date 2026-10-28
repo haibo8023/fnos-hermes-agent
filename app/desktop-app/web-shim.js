@@ -780,9 +780,13 @@
   //   1) 新前端用「方法是否存在」判能力（如 `if (!d.git?.worktreeList) return`），
   //      所以 Electron 专属能力必须真的不存在（undefined），否则代码路径被激活后因形状不符崩溃；
   //   2) web 真正需要的命名空间按官方签名实现，返回 web 语义的数据。
+  // preparedSubmissions：Electron 里存在，但 web 版的等价实现就是 localStorage。
+  // 新前端发消息前会 JSON.parse(await preparedSubmissions.read()) 并校验是 object，
+  // Proxy 兜底返回 null → 直接抛 "Invalid prepared submission journal"；
+  // 列为 ABSENT 后前端走 localStorage 分支（与浏览器打开 web 版一致）。
   var SHIM_ABSENT = (function () {
     var m = {};
-    ['git', 'terminal', 'petOverlay', 'hud', 'hudModifier', 'quickEntry', 'wakeIndicator', 'updateHold', 'uninstall', 'mcpOauth', 'freeTierChallenge', 'minimizeToTray', 'windowControls', 'windowRelay', 'chatOnboarding', 'capturePreview', 'screenshot'].forEach(function (k) { m[k] = 1; });
+    ['git', 'terminal', 'petOverlay', 'hud', 'hudModifier', 'quickEntry', 'wakeIndicator', 'updateHold', 'uninstall', 'mcpOauth', 'freeTierChallenge', 'minimizeToTray', 'windowControls', 'windowRelay', 'chatOnboarding', 'capturePreview', 'screenshot', 'preparedSubmissions'].forEach(function (k) { m[k] = 1; });
     // 供 CI 桥面检查（scripts/desktop-app/check-bridge-surface.py）读取
     try { window.__HERMES_SHIM_ABSENT__ = m; } catch (e) {}
     return m;
