@@ -1,0 +1,1 @@
+export{t as CapabilitiesView}from"./capabilities-BWDiGuwH.js";
