@@ -21,8 +21,20 @@ SOCKET_PATH="${TRIM_APPDEST}/hermes-agent.sock"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}; }
 
+# 同步应用中心状态：UI 的「运行中/已停止」只看 app 表的 status / is_stop。
+# 老版本只有 monitor.js 在启动时写 running，停止时没人写 stopped → 停用后界面仍显示运行中；
+# monitor 若已挂死（历史事故）更是完全没人写。生命周期脚本这里是唯一的可靠兜底。
+sync_app_status() {
+    local st="$1" is_stop="f"
+    [ "$st" = "stopped" ] && is_stop="t"
+    sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c \
+        "UPDATE app SET status='${st}', is_stop='${is_stop}', updated_at=now() WHERE app_name='hermes-agent'" >/dev/null 2>&1 \
+        && log_msg "appcenter 状态已同步: ${st}" \
+        || log_msg "WARNING: appcenter 状态同步失败 (${st})"
+}
+
 start_process() {
-    if status; then ensure_dashboard; return 0; fi
+    if status; then ensure_dashboard; sync_app_status running; return 0; fi
     if ! command -v node >/dev/null 2>&1; then log_msg "node not found"; return 1; fi
 
     # 修复权限漂移：确保数据/日志目录归属与 app 目录一致，防止 root/hermes-agent 混跑导致 EACCES
@@ -56,6 +68,7 @@ start_process() {
         if [ -S "${SOCKET_PATH}" ]; then
             chmod 777 "${SOCKET_PATH}" 2>/dev/null
             log_msg "Started, pid=$!, socket=${SOCKET_PATH} (verified)"
+            sync_app_status running
             return 0
         fi
         sleep 0.5
@@ -64,6 +77,7 @@ start_process() {
     log_msg "WARNING: socket not created after 5s at ${SOCKET_PATH}"
     log_msg "SOCK_DIR exists=$([ -d "${SOCK_DIR}" ] && echo yes || echo no) writable=$([ -w "${SOCK_DIR}" ] && echo yes || echo no)"
     log_msg "Started anyway, pid=$!"
+    sync_app_status running
     return 0
 }
 
@@ -85,10 +99,14 @@ stop_process() {
     pkill -TERM -f "node.*monitor\.js" 2>/dev/null || true
     sleep 1
     pkill -9 -f "node.*monitor\.js" 2>/dev/null || true
-    pkill -9 -f "hermes.*gateway" 2>/dev/null || true
-    pkill -9 -f "hermes.*dashboard" 2>/dev/null || true
+    # 收窄兜底 pkill：只清本应用自己 venv 起的网关/仪表盘。
+    # 原来的宽匹配会命中同用户下其它 hermes 网关（例如以同一用户手工拉起的实例），
+    # 跨用户时 pkill 本来就杀不动，收窄只是把「误杀风险」消掉，覆盖范围不变。
+    pkill -9 -f "${DATA_DIR}/venv/bin/hermes.*gateway" 2>/dev/null || true
+    pkill -9 -f "${DATA_DIR}/venv/bin/hermes.*dashboard" 2>/dev/null || true
     rm -f "${PID_FILE}"
     rm -f "${SOCKET_PATH}"
+    sync_app_status stopped
     log_msg "Stopped (incl. leftover cleanup)"
     return 0
 }
