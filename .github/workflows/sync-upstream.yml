@@ -102,7 +102,11 @@ jobs:
           cur_desktop_tree="$(git -C upstream rev-parse --verify -q "HEAD:apps/desktop" 2>/dev/null || true)"
           case "$cur_desktop_tree" in *[!0-9a-f]*|"") cur_desktop_tree="" ;; esac
           # 注意：不能放 .upstream-state —— merge-upstream.js 每轮整份重写那个文件
-          prev_desktop_tree="$(sed -n 's/^DESKTOP_TREE="\([0-9a-f]*\)".*/\1/p' .desktop-state 2>/dev/null | head -1)"
+          # 且必须在 -e + pipefail 下安全：文件不存在时 sed 返回 2，直接赋值会把整步打成失败
+          prev_desktop_tree=""
+          if [ -f .desktop-state ]; then
+            prev_desktop_tree="$(sed -n 's/^DESKTOP_TREE="\([0-9a-f]*\)".*/\1/p' .desktop-state | sed -n '1p')"
+          fi
           desktop_changed=false
           if [ -z "$cur_desktop_tree" ]; then
             echo "::warning::读不到上游 apps/desktop 的 tree（上游目录结构改了？）→ 本轮不判定前端变化"
