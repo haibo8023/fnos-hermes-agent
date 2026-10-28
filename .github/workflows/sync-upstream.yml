@@ -77,50 +77,106 @@ jobs:
         run: |
           node scripts/merge-upstream.js --upstream upstream --write
 
-      # 受控合并后判断是否真的产生了运行时变化：上游只改 docs/website/CI 这类
-      # 非运行时文件时，app/hermes-src 不会有变化 —— 此时回滚版本号、跳过构建与发布，
-      # 只把 .upstream-state 前移（由下一个 Commit/Push 步骤落库），避免发布"空版本"
-      # 把版本号推高（2026-09-23 实测：docs 提交让 VERSION 从 .02 一路涨到 .04）。
+      # 判断本轮是否需要构建/发布。三个来源任一成立即构建：
+      #   1) app/hermes-src 有运行时变化（受控合并产生 diff）
+      #   2) 上游 apps/desktop 的 tree sha 与「上次成功刷新的记录」不同（纯前端提交）
+      #   3) 手动 force_build
+      # 2026-10-28 修的真缺口：旧逻辑只看 app/hermes-src，上游「只改桌面端」的提交会让
+      # runtime_changed=false → 回滚版本号、不构建不发布 → 前端 dist 永远停在上一次后端
+      # 变化那天（上游 fix(desktop) 很密集，前端会持续变旧）。现在前端用
+      # 「上游 apps/desktop tree sha」做判据：tree 变了才重刷 dist，刷新成功后把新 tree
+      # 记进独立状态文件 .desktop-state（merge-upstream 不碰它）；没记上（构建失败/告警）下轮重试。
+      # 上游只改 docs/website/CI 这类非运行时文件时仍不构建，避免发布"空版本"把版本号推高
+      # （2026-09-23 实测：docs 提交让 VERSION 从 .02 一路涨到 .04）。
       - name: Detect runtime changes
         id: rt
         if: steps.check.outputs.changed == 'true'
         run: |
-          set -euo pipefail
-          changes="$(git status --porcelain app/hermes-src)"
-          if [ -n "$changes" ] || [ "${{ inputs.force_build }}" = "true" ]; then
-            echo "runtime_changed=true" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+          src_changes="$(git status --porcelain app/hermes-src)"
+          src_changed=false
+          if [ -n "$src_changes" ]; then src_changed=true; fi
+
+          # --verify 是必须的：不带它时 git rev-parse 对无法解析的写法会原样回显参数（会把
+          # "HEAD:apps/desktop" 当 sha 用，导致永远判定"前端有变化"）
+          cur_desktop_tree="$(git -C upstream rev-parse --verify -q "HEAD:apps/desktop" 2>/dev/null || true)"
+          case "$cur_desktop_tree" in *[!0-9a-f]*|"") cur_desktop_tree="" ;; esac
+          # 注意：不能放 .upstream-state —— merge-upstream.js 每轮整份重写那个文件
+          prev_desktop_tree="$(sed -n 's/^DESKTOP_TREE="\([0-9a-f]*\)".*/\1/p' .desktop-state 2>/dev/null | head -1)"
+          desktop_changed=false
+          if [ -z "$cur_desktop_tree" ]; then
+            echo "::warning::读不到上游 apps/desktop 的 tree（上游目录结构改了？）→ 本轮不判定前端变化"
+          elif [ -z "$prev_desktop_tree" ]; then
+            desktop_changed=true
+            echo "◈ .desktop-state 无 DESKTOP_TREE（首次或旧记录）→ 本轮刷新前端 dist"
+          elif [ "$cur_desktop_tree" != "$prev_desktop_tree" ]; then
+            desktop_changed=true
+          fi
+          echo "◈ 前端 tree: 当前 ${cur_desktop_tree:0:12} / 上次刷新 ${prev_desktop_tree:0:12} → desktop_changed=${desktop_changed}"
+
+          if [ "$src_changed" = "true" ]; then
             echo "◈ app/hermes-src 有运行时变化："
-            printf '%s\n' "$changes" | head -20 || true
+            printf '%s\n' "$src_changes" | sed -n '1,20p'
           else
-            echo "runtime_changed=false" >> "$GITHUB_OUTPUT"
-            echo "◈ 上游提交未影响运行时（app/hermes-src 无变化）→ 本轮只记录上游状态，不构建不发布"
+            echo "◈ app/hermes-src 无运行时变化"
+          fi
+
+          if [ "$src_changed" = "true" ] || [ "$desktop_changed" = "true" ] || [ "${{ inputs.force_build }}" = "true" ]; then
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+            echo "◈ 上游提交既没动运行时也没动 apps/desktop → 只记录上游状态，不构建不发布"
             git checkout -- VERSION
           fi
+          echo "src_changed=$src_changed" >> "$GITHUB_OUTPUT"
+          echo "desktop_changed=$desktop_changed" >> "$GITHUB_OUTPUT"
 
       # ── 刷新 app/desktop-app：从本次 upstream checkout 构建 desktop renderer 的 web dist，
       #    同步进 app/desktop-app 再叠加 overlay/desktop-app（web-shim 层）。
       #    app/desktop-app 是官方 dist 的整份拷贝，而上游同步（merge-upstream.js）只覆盖 app/hermes-src，
       #    所以桌面端必须在这里单独刷新，否则会一直停在入库那天的旧前端（2026-10-10 的
       #    「恢复失败 session not found」弹窗就是旧 dist 引起的）。
-      #    构建失败只告警、保留旧 dist，不阻断上游同步。
+      #    触发条件是「上游 apps/desktop 的 tree 变了」（steps.rt.outputs.desktop_changed），
+      #    而不是「后端有没有变化」——纯前端提交也要刷新，否则前端会越攒越旧。
+      #    构建失败只告警、保留旧 dist，不阻断上游同步；此时不写 DESKTOP_TREE，下轮重试。
       #    ⚠ 默认关闭：开关 = 仓库变量 DESKTOP_DIST_REFRESH=true。
       #      原因：新 dist 需要把 web-shim 升到官方命名空间式桥（hermesDesktop.connections/profile/settings…），
       #      否则 renderer 直接进错误边界（实测 "Something broke in the interface"）。shim 适配完成后再开。
       - name: Setup Node for desktop dist
-        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.desktop_changed == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
       - name: Refresh desktop dist (upstream renderer + overlay)
-        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.desktop_changed == 'true'
         run: |
-          bash scripts/desktop-app/sync-dist.sh --upstream upstream --target app/desktop-app
+          set -uo pipefail
+          bash scripts/desktop-app/sync-dist.sh --upstream upstream --target app/desktop-app 2>&1 | tee /tmp/desktop-dist.log
+          if grep -q 'title=desktop dist refresh' /tmp/desktop-dist.log; then
+            echo "::warning::前端 dist 刷新失败（已保留旧 dist），本轮不记录 DESKTOP_TREE，下轮重试"
+          fi
+
+      # 记录本次已刷新的前端 tree：只有刷新成功才写，失败时保持旧值 → 下一轮自动重试
+      - name: Record desktop tree
+        if: vars.DESKTOP_DIST_REFRESH == 'true' && steps.check.outputs.changed == 'true' && steps.rt.outputs.desktop_changed == 'true'
+        run: |
+          set -uo pipefail
+          if grep -q 'title=desktop dist refresh' /tmp/desktop-dist.log 2>/dev/null; then
+            echo "跳过记录：本轮前端刷新失败"
+            exit 0
+          fi
+          CUR="$(git -C upstream rev-parse --verify -q "HEAD:apps/desktop")"
+          case "$CUR" in *[!0-9a-f]*|"") echo "✗ 解析不到上游 apps/desktop tree" >&2; exit 1 ;; esac
+          printf 'DESKTOP_TREE="%s"\n' "$CUR" > .desktop-state
+          echo "◈ 已记录 .desktop-state: DESKTOP_TREE=${CUR:0:12}"
+          cat .desktop-state
 
       # 先提交合并结果（build.sh 增量包 diff 需要 HEAD 包含合并）
       - name: Commit sync & merge
         if: steps.check.outputs.changed == 'true'
         run: |
+          [ -f .desktop-state ] && git add .desktop-state || true
           git add VERSION .upstream-state app/hermes-src scripts/merge-upstream.js \
                   app/desktop-app overlay scripts/desktop-app
           git commit -m "sync: 上游 ${{ steps.version.outputs.version }} 受控合并（保留移植修改）" --allow-empty || true
@@ -130,7 +186,7 @@ jobs:
 #      布局：venv/ + python/（自带 CPython 3.14；上游 0.21.6 起运行时要求 Python >=3.12）
       #   2) 兜底：从本仓库最近一个 .fpk Release 里解包提取（不再依赖任何外部仓库）
       - name: Fetch venv-bundle
-        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.needs_build == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -164,13 +220,13 @@ jobs:
           ls -la fpk/venv-bundle.tar.gz && echo "✓ venv-bundle 就绪"
 
       - name: Build
-        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.needs_build == 'true'
         run: |
           bash scripts/build.sh
 
       # 包内校验：拦住「载荷缺包 / 版本号文件没更新」类事故（只有真机才暴露）
       - name: Verify package contents
-        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.needs_build == 'true'
         run: |
           set -euo pipefail
           FPK="$GITHUB_WORKSPACE/dist/fnos-hermes-agent_v$(cat "$GITHUB_WORKSPACE/VERSION").fpk"
@@ -213,7 +269,7 @@ jobs:
       # import 即 NameError，网关/仪表盘起不来，前端报 "Could not connect to Hermes gateway"。
       # 这一步专门拦「venv 与运行时不匹配」，比只看文件在不在强得多。
       - name: Smoke test runtime with bundled venv
-        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.needs_build == 'true'
         run: |
           set -euo pipefail
           rm -rf /tmp/vbsmoke /tmp/vbsmoke-home && mkdir -p /tmp/vbsmoke /tmp/vbsmoke-home
@@ -239,7 +295,7 @@ jobs:
           git push origin HEAD:main
 
       - name: Publish
-        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.runtime_changed == 'true'
+        if: steps.check.outputs.changed == 'true' && steps.rt.outputs.needs_build == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
