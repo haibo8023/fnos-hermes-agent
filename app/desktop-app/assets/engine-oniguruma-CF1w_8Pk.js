@@ -1,0 +1,1 @@
+export{if as createOnigurumaEngine}from"./shiki-Ca0O1362.js";

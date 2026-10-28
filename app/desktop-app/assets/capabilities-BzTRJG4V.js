@@ -1,1 +1,0 @@
-export{bt as CapabilitiesView}from"./sdk-c5aBM5h6.js";

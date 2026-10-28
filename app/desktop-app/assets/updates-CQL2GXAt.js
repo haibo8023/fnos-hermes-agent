@@ -1,1 +1,0 @@
-export{S as openUpdatesWindow}from"./updates-CthjUnJU.js";
