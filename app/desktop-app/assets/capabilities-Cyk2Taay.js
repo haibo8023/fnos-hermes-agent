@@ -1,1 +1,0 @@
-export{t as CapabilitiesView}from"./capabilities-CL1vOGZd.js";
