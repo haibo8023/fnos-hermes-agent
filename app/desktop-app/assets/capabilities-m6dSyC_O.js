@@ -1,0 +1,1 @@
+export{t as CapabilitiesView}from"./capabilities-DVh66D64.js";
