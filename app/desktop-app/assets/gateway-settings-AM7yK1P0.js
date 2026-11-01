@@ -1,1 +1,0 @@
-export{t as GatewaySettings}from"./gateway-settings-BNv-qB5Z.js";
