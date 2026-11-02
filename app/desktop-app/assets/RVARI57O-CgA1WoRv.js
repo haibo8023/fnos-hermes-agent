@@ -1,0 +1,1 @@
+function e(e,t,n){for(let r=0;r<n.length;r++){let i=e.charCodeAt(t+r),a=n.charCodeAt(r);if(i!==a&&!(a>=97&&a<=122&&i===a-32))return!1}return!0}export{e as t};

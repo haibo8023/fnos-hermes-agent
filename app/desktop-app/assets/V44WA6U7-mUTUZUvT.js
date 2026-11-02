@@ -1,0 +1,1 @@
+import{s as e}from"./EXE5EH6O-Doj5jfQa.js";var t=/[\t ]*accDescr(?:[\t ]*:(?:[^\n\r]*?(?=%%)|[^\n\r]*)|\s*({))/y;function n(){let e=!1;return(n,r)=>{t.lastIndex=r;let i=t.exec(n);if(i===null)return-1;let a=t.lastIndex;if(i[1]===void 0)return a;if(e)return-1;let o=n.indexOf(`}`,a);return e=o===-1,o+1||-1}}function r(t=`ACC_DESCR`){return{...e,name:t,scanner:n}}export{r as t};

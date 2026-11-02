@@ -1,1 +1,0 @@
-export{Ot as createArchitectureServices}from"./mermaid-iGperVF6.js";

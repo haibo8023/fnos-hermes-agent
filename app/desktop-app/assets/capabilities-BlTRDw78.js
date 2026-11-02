@@ -1,0 +1,1 @@
+export{t as CapabilitiesView}from"./capabilities-C-IA_X0A.js";
