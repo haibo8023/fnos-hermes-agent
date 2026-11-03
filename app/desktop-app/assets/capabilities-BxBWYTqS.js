@@ -1,1 +1,0 @@
-export{t as CapabilitiesView}from"./capabilities-By3m12Cd.js";
