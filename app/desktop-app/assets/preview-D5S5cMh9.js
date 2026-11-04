@@ -1,1 +1,0 @@
-export{A as openPreview}from"./preview-GLJU8gyp.js";

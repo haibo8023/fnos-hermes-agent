@@ -1,1 +1,0 @@
-export{t as GatewaySettings}from"./gateway-settings-CcjXA8m_.js";
