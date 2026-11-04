@@ -1,0 +1,1 @@
+export{t as CapabilitiesView}from"./capabilities-BtpU_SdC.js";
