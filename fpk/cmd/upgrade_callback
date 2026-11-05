@@ -320,6 +320,22 @@ if [ -x "${TRIM_APPDEST:-/var/apps/hermes-agent}/init/init.sh" ]; then
     "${TRIM_APPDEST:-/var/apps/hermes-agent}/init/init.sh" >> "${TRIM_PKGVAR}/info.log" 2>&1 || log_msg 'WARNING: init.sh 执行失败'
 fi
 
+# —— 应用中心「停用/卸载」入口开关（2026-11-05 实测）——
+# app 表的 is_stop / is_uninstall 决定详情页是否出现启停与卸载下拉；
+# 手工部署的应用这两列一直是 false，于是面板上永远只有一个「打开」按钮。
+# 安装/升级回调里补一次，保证重装后不会退化。
+_appctl_sql="UPDATE app SET is_stop='t', is_uninstall='t', updated_at=now() WHERE app_name='hermes-agent'"
+if [ "$(id -u)" = "0" ]; then
+    _appctl_ok=$(sudo -u postgres /usr/bin/psql -d appcenter -tAc "$_appctl_sql" 2>&1)
+else
+    _appctl_ok=$(sudo -n sudo -u postgres /usr/bin/psql -d appcenter -tAc "$_appctl_sql" 2>&1)
+fi
+case "$_appctl_ok" in
+    *UPDATE*) log_msg "应用中心控制开关已置位（is_stop/is_uninstall=true）" ;;
+    *)        log_msg "WARNING: 控制开关置位失败: ${_appctl_ok}" ;;
+esac
+
+trap - ERR
 trap - ERR
 log_msg "upgrade_callback finished successfully."
 exit 0
