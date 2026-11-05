@@ -152,7 +152,10 @@ function syncAppCenterStatus(status) {
     );
     log(`[appcenter] 状态已同步: status=${status}`);
   } catch (e) {
-    log(`[appcenter] 状态同步失败 (status=${status}): ${e?.message || e}`);
+    // 关机/重启场景下 psql 或 sudo 会失败（postgres 已停 / 进程组收到信号），
+    // 只记 message 看不出原因，把 stderr 也留下来（下次排查用）
+    const _err = e?.stderr ? String(e.stderr).trim().slice(0, 400) : '';
+    log(`[appcenter] 状态同步失败 (status=${status}): ${e?.message || e}${_err ? ' | stderr: ' + _err : ''}`);
   }
 }
 syncAppCenterStatus("running");
