@@ -1,0 +1,1 @@
+export{t as GatewaySettings}from"./gateway-settings-DBOm1Xx7.js";
