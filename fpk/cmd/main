@@ -17,6 +17,15 @@ export PATH=/var/apps/nodejs_v24/target/bin:/var/apps/nodejs_v22/target/bin:/var
 DATA_DIR="${TRIM_PKGHOME}/data"
 VAR_DIR="${TRIM_PKGVAR}"
 MONITOR_SCRIPT="${TRIM_APPDEST}/server/monitor.js"
+# ── 路径兜底（2026-11-06 实测事故）──────────────────────────────────────────
+# 应用中心/其它调用方有时只传 /var/apps/<app>（壳目录，server/ 实际在它下面的 target/ 里），
+# 甚至完全不传环境变量 → 用上面那行默认值 → MONITOR_SCRIPT 不存在 → node 报 MODULE_NOT_FOUND，
+# socket 也建在 root 只读的壳目录里（SOCK_DIR writable=no），应用看起来"网关卡死/起不来"。
+# 这里统一纠正到真正含 server/monitor.js 的目录。
+if [ ! -f "${MONITOR_SCRIPT}" ] && [ -f "${TRIM_APPDEST}/target/server/monitor.js" ]; then
+    TRIM_APPDEST="${TRIM_APPDEST}/target"
+    MONITOR_SCRIPT="${TRIM_APPDEST}/server/monitor.js"
+fi
 SOCKET_PATH="${TRIM_APPDEST}/hermes-agent.sock"
 
 log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}; }
@@ -54,6 +63,13 @@ start_process() {
 
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null
 
+    # 固定 monitor 的工作目录，避免继承调用者（例如旧 hermes-studio）的 cwd。
+    # HERMES_HOME 只决定数据Home，不会自动修正进程 cwd 及相对路径解析。
+    if ! cd "${DATA_DIR}"; then
+        log_msg "ERROR: cannot enter DATA_DIR=${DATA_DIR}"
+        return 1
+    fi
+    log_msg "WORKING_DIR=$(pwd)"
     log_msg "Starting Hermes Agent monitor (socket mode) ..."
     log_msg "SOCKET_PATH=${SOCKET_PATH}"
     log_msg "TRIM_APPDEST=${TRIM_APPDEST}"
