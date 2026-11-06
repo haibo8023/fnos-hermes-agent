@@ -1,0 +1,1 @@
+export{t as CapabilitiesView}from"./capabilities-2M44y23m.js";
