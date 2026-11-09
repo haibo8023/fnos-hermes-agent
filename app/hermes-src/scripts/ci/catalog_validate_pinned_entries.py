@@ -10,6 +10,8 @@ The supply-chain half of the plugin-catalog admission gate. For every entry path
 * a subdir or any symlink in the clone that resolves outside the pinned clone;
 * a subdir with no ``plugin.yaml``/``plugin.yml``/``plugin.json``;
 * a failing ``hermes plugins validate --install-deps``;
+* an ``attested_binaries`` path that is not a regular file, or has no build-provenance attestation
+  from the entry's repo at the pinned sha (README rule 17);
 * an unscannable payload: compiled binary, bytecode or archive hiding either (README rule 17);
 * a self-updater (README rule 3).
 
@@ -34,7 +36,35 @@ from pathlib import Path
 
 _FIELDS_SCRIPT = Path(__file__).resolve().with_name("catalog_entry_fields.py")
 _MANIFESTS = ("plugin.yaml", "plugin.yml", "plugin.json")
+# A GitHub fetch. The pattern itself is plain (grep -E): the ajv exemption is applied in Python
+# afterward, in _file_fetches_github, so it cannot be gamed by quoting/spacing of the ajv
+# declaration (grep lookbehinds were brittle across minifiers) and cannot hide a real fetch that
+# merely shares a line with the inert ajv id.
 _SELF_UPDATE_FETCH = r"releases/latest|releases/download|raw\.githubusercontent\.com|codeload\.github\.com"
+# ajv's bundled meta-schema declares its own identifier as `$id`/`$ref` = this URL. The string is
+# matched by value against a schema ajv already holds in memory; it never drives a request. It is
+# inert ONLY as a JSON-schema declaration -- `[$ or "]id/ref : "<url>"` -- so the same literal
+# reused as an executable fetch base (new URL('/evil', ajvUrl)) is not exempt. The match is
+# lexical: a declared id read back as a fetch base (new URL(p, s.$id)) is not caught, and
+# escaped-JSON or backtick spellings stay flagged. "#" is the only terminator, so a traversal like
+# .../data.json#/../../evil (or out of lib/refs) is a different, non-exempt URL and still counts.
+_AJV_ID = "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#"
+_AJV_DECLARATION = re.compile(
+    r"""["$](?:id|ref)["']?\s*:\s*["']""" + re.escape(_AJV_ID) + r"""["']""")
+_GITHUB_FETCH = re.compile(_SELF_UPDATE_FETCH)
+
+
+def _file_fetches_github(path: str) -> bool:
+    # True when the file fetches from GitHub for real. ajv's inert meta-schema DECLARATION is
+    # removed first (any quoting/spacing); whatever raw.githubusercontent / release URL remains is
+    # a real fetch. Reading the file as text mirrors what grep -l would have matched.
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return True  # unreadable here means the grep already flagged it; keep it flagged
+    return bool(_GITHUB_FETCH.search(_AJV_DECLARATION.sub("", text)))
+
+
 _SELF_UPDATE_WRITE = (r"writeTextFile|renamePath|writeFile\(|writeFileSync|renameSync|copyFileSync"
                       r"|cpSync|createWriteStream")
 _SCRIPT_GLOBS = ("*.js", "*.mjs", "*.cjs", "*.ts", "*.jsx", "*.tsx", "*.mts", "*.cts")
@@ -42,6 +72,8 @@ _SCRIPT_GLOBS = ("*.js", "*.mjs", "*.cjs", "*.ts", "*.jsx", "*.tsx", "*.mts", "*
 # false-fail a re-pin on a slow runner.
 _CLONE_SECONDS = 600
 _VALIDATE_SECONDS = 600
+_ATTEST_SECONDS = 120
+_PROVENANCE = "https://slsa.dev/provenance/v1"
 
 
 class EntryRejected(Exception):
@@ -63,7 +95,7 @@ def _substituted(output: bytes) -> str:
     return os.fsdecode(output.replace(b"\0", b"")).rstrip("\n")
 
 
-_FIELDS = ("REPO", "SHA", "SUBDIR", "BAD")
+_FIELDS = ("REPO", "SHA", "SUBDIR", "ATTESTED", "BAD")
 
 
 def _read_fields(entry: str) -> dict[str, str]:
@@ -135,6 +167,25 @@ def _check_confinement(clone_dir: str, plugin_dir: str, subdir: str) -> None:
         raise EntryRejected("a symlink in the repo resolves outside the pinned clone")
 
 
+def _check_attested(attested: str, plugin_dir: str, repo: str, sha: str) -> None:
+    # A plugin that needs a native component lists it under attested_binaries (README rule 17).
+    # Each must have been built by THIS repo at the pinned commit; a verified one is removed from
+    # the clone, so the payload scan that follows ignores it and any other binary still fails.
+    # Provenance says where a file came from, not what it does: every check that reads the
+    # plugin's files (the self-updater grep) must run before this removes any of them.
+    owner_repo = repo.removeprefix("https://github.com/").removesuffix(".git").removesuffix("/")
+    for path in filter(None, attested.split("\n")):
+        binary = f"{plugin_dir}/{path}"
+        if os.path.islink(binary) or not os.path.isfile(binary):
+            raise EntryRejected(f"attested_binaries path is not a regular file: {path}")
+        verify = ["gh", "attestation", "verify", binary, "--repo", owner_repo,
+                  "--source-digest", sha, "--predicate-type", _PROVENANCE]
+        if _run(verify, timeout=_ATTEST_SECONDS).returncode != 0:
+            raise EntryRejected(f"no build-provenance attestation for {path} at "
+                                f"{owner_repo}@{sha} (README rule 17)")
+        os.remove(binary)
+
+
 def _check_payloads(plugin_dir: str) -> None:
     # UNSCANNABLE-PAYLOAD GATE (README rule 17). A reviewer and the install scanner must be able
     # to read everything shipped at the pin as source: no compiled binaries (by header),
@@ -155,10 +206,17 @@ def _check_self_updater(plugin_dir: str) -> None:
     # both ways: committed filenames with spaces or newlines must not split into grep options
     # or forged log lines.
     includes = [f"--include={glob}" for glob in _SCRIPT_GLOBS]
-    fetchers = _run(["grep", "-rlZE", _SELF_UPDATE_FETCH, *includes, plugin_dir],
-                    stdout=subprocess.PIPE).stdout
+    # grep -E gives a cheap first cut of files mentioning any GitHub-fetch URL; _file_fetches_github
+    # then drops those whose only match is ajv's inert meta-schema DECLARATION. NUL-delimited so
+    # committed filenames with spaces or newlines cannot split into grep options or forge log lines.
+    candidates = _run(["grep", "-rlZE", _SELF_UPDATE_FETCH, *includes, plugin_dir],
+                      stdout=subprocess.PIPE).stdout
+    real = b"\0".join(p for p in candidates.split(b"\0")
+                      if p and _file_fetches_github(os.fsdecode(p)))
+    if not real:
+        return
     writers = subprocess.run(["xargs", "-r0", "grep", "-lZE", _SELF_UPDATE_WRITE],
-                             input=fetchers, stdout=subprocess.PIPE, check=False,
+                             input=real, stdout=subprocess.PIPE, check=False,
                              timeout=_VALIDATE_SECONDS).stdout
     found = _substituted(writers).replace("\n", " ")
     if found:
@@ -191,8 +249,9 @@ def validate_entry(entry: str, workroot: str) -> None:
     validate = ["hermes", "plugins", "validate", "--install-deps", plugin_dir]
     if _run(validate, timeout=_VALIDATE_SECONDS).returncode != 0:
         raise EntryRejected("hermes plugins validate failed")
-    _check_payloads(plugin_dir)
     _check_self_updater(plugin_dir)
+    _check_attested(fields["ATTESTED"], plugin_dir, repo, sha)
+    _check_payloads(plugin_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
