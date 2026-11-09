@@ -143,22 +143,50 @@ _deployBuiltinSkills();
 // 同步 fnOS 应用中心状态（app 表 status / is_stop）——UI 的「运行中/已停止」完全看这两个字段。
 // 2026-10-28 修的真缺陷：旧代码只在启动时写 status='running'，停止时没有任何人写 stopped，
 // 于是停用后应用中心永远显示「运行中」（用户以为「停不掉」）；进程其实已经退出了。
-function syncAppCenterStatus(status) {
+function syncAppCenterStatus(status, _tries) {
   const isStop = status === "running" ? "f" : "t";
-  try {
-    execSync(
-      `sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c "UPDATE app SET status='${status}', is_stop='${isStop}', updated_at=now() WHERE app_name='hermes-agent'" 2>&1`,
-      { timeout: 10000 }
-    );
-    log(`[appcenter] 状态已同步: status=${status}`);
-  } catch (e) {
-    // 关机/重启场景下 psql 或 sudo 会失败（postgres 已停 / 进程组收到信号），
-    // 只记 message 看不出原因，把 stderr 也留下来（下次排查用）
-    const _err = e?.stderr ? String(e.stderr).trim().slice(0, 400) : '';
-    log(`[appcenter] 状态同步失败 (status=${status}): ${e?.message || e}${_err ? ' | stderr: ' + _err : ''}`);
+  const tries = _tries || 3;
+  for (let i = 0; i < tries; i++) {
+    try {
+      execSync(
+        `sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c "UPDATE app SET status='${status}', is_stop='${isStop}', is_non_manual_stop='f', updated_at=now() WHERE app_name='hermes-agent'" 2>&1`,
+        { timeout: 10000 }
+      );
+      log(`[appcenter] 状态已同步: status=${status}`);
+      return true;
+    } catch (e) {
+      // 关机/重启场景下 psql 或 sudo 会失败（postgres 已停 / 进程组收到信号）。
+      // 停止路径只在这一刻有一次机会（之后 monitor 就退出了，看门狗也没了），
+      // 所以必须重试：否则状态会永久卡在 running/start，下次启动被应用中心以 10332 拒绝。
+      const _out = e?.stdout ? String(e.stdout).trim().slice(0, 300) : '';
+      const _err = e?.stderr ? String(e.stderr).trim().slice(0, 300) : '';
+      log(`[appcenter] 状态同步失败 (status=${status}, 第 ${i + 1}/${tries} 次): ${e?.message || e}${_out ? ' | stdout: ' + _out : ''}${_err ? ' | stderr: ' + _err : ''}`);
+      if (i < tries - 1) {
+        try { execSync("sleep 0.8"); } catch (_) {}
+      }
+    }
   }
+  return false;
 }
 syncAppCenterStatus("running");
+
+// ── 状态看门狗（2026-11-09 事故）──────────────────────────────────────────
+// monitor 活着就等于应用在运行。但只要有一次状态同步失败（关机时序 / psql 短暂不可用），
+// app 表就会停在 start/stopped：应用中心随后拒绝创建启动任务（error 10332），
+// 桌面也会把这个"状态异常"的应用隐藏掉（用户看到的就是"图标没了 / 网关挂了"）。
+// 每 60s 校正一次，只在状态不符时才写库，避免刷日志。
+setInterval(() => {
+  try {
+    const cur = execSync(
+      `sudo -n sudo -u postgres /usr/bin/psql -d appcenter -tAc "SELECT status FROM app WHERE app_name='hermes-agent'" 2>/dev/null`,
+      { timeout: 8000 }
+    ).toString().trim();
+    if (cur && cur !== "running") {
+      log(`[appcenter] 看门狗: 状态 ${cur} → running（monitor 实际在运行）`);
+      syncAppCenterStatus("running");
+    }
+  } catch (e) {}
+}, 60000);
 
 // 知识库/记忆种子：首次启动时写入基础内容（仅文件不存在时），让知识库与记忆页不空
 function _kbRootForSeed(){
@@ -3425,6 +3453,7 @@ function spawnHermes(name, pidPath, args) {
 
   const logFd = openSync(logPath, "a");
   const p = spawn(HERMES_BIN, args, {
+    cwd: DATA_DIR,
     env,
     stdio: ["ignore", logFd, logFd],
   });
