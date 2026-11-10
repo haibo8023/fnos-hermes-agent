@@ -241,6 +241,19 @@ class GatewayTopicThreadsMixin:
             self._sync_telegram_topic_binding(source, session_entry, reason=reason)
             return True
 
+    async def _handoff_repoint_with_topic_binding(self, dest, session_key: str, cli_session_id: str) -> None:
+        """Handoff's route switch plus its topic-binding move. A Telegram DM topic lane follows its
+        persisted binding, which would switch the route straight back to the topic's previous session
+        on the next turn; the binding moves with the route, as /resume moves it, and only while the
+        route still names the handoff. Raises when a /new, /resume or /branch --here moved the topic
+        meanwhile: the synthetic turn would load the handoff's history into that newer conversation,
+        and failing keeps the CLI session."""
+        with self._telegram_topic_publication(dest.source):
+            entry = await self._handoff_repoint(dest, session_key, cli_session_id)
+            holds = await self._follow_telegram_topic_switch(dest.source, entry, reason="handoff")
+        if not holds:
+            raise RuntimeError("the destination topic switched to another session during the handoff")
+
     async def _telegram_topic_switch_conflict(self, source: SessionSource, target_session_id: str) -> Optional[str]:
         """Refusal text when ``target_session_id`` is bound to ANOTHER topic: a session links to one
         topic only, so after the route moved the binding write would fail and the next message's heal
