@@ -186,7 +186,9 @@ from plugins.platforms.telegram.telegram_ingress import TelegramContactMixin
 from plugins.platforms.telegram.telegram_replacement import TelegramReplacementMixin
 from plugins.platforms.telegram.telegram_polling_probe import TelegramPendingProbeMixin
 from plugins.platforms.telegram.telegram_intake import effective_update_message
-from plugins.platforms.telegram.telegram_media_group import add_item_note, flush_media_group_event, queue_media_group_event
+from plugins.platforms.telegram.telegram_media_group import (
+    add_item_note, flush_media_group_event, inline_item_text, queue_media_group_event)
+from plugins.platforms.telegram.telegram_live_location import is_redundant_live_refresh
 from plugins.platforms.telegram.telegram_text_photo_pairing import (
     IMAGE_EXTENSIONS as _TELEGRAM_IMAGE_EXTENSIONS, absorb_claimed_text, claim_pending_text, is_image_document, tracking_media_items,
     wait_text_flush)
@@ -206,7 +208,7 @@ from plugins.platforms.telegram.telegram_network import (
     proxy_target_hosts, telegram_verify)
 from plugins.platforms.telegram.telegram_outbound import is_visually_empty, resolve_notifications_mode
 from plugins.platforms.telegram.telegram_send_path_recovery import TelegramSendPathRecoveryMixin, mark_send_path_recovered
-from plugins.platforms.telegram.telegram_send_errors import LOST, is_entity_parse_error, maybe_delivered_result as _maybe_delivered_result, send_error_kind
+from plugins.platforms.telegram.telegram_send_errors import LOST, is_entity_parse_error, maybe_delivered_result as _maybe_delivered_result, send_error_kind, FLOOD, UNSENT, rich_failure_result
 from plugins.platforms.telegram.telegram_typing_gate import claim_ai_action, typing_may_fire
 from plugins.platforms.telegram.telegram_group_observe import apply_group_observe_attribution, observed_media_note, shared_sender_suffix
 from plugins.platforms.telegram.telegram_picker_labels import model_button_labels
@@ -353,7 +355,7 @@ from plugins.platforms.telegram.telegram_chunking import (
 
 # MarkdownV2 has no table syntax, so pipe tables become bullet groups via convert_table_to_bullets().
 from gateway.platforms.helpers import (
-    TABLE_SEPARATOR_RE as _TABLE_SEPARATOR_RE, compile_mention_patterns, prompt_id_counter)
+    TABLE_SEPARATOR_RE as _TABLE_SEPARATOR_RE, caption_is_command, compile_mention_patterns, prompt_id_counter)
 
 # Internal safety bounds (not user knobs): no reconnect/teardown path may hang on a dead CLOSE-WAIT
 # socket PTB's polling task is blocked on in epoll.
@@ -1367,7 +1369,7 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         caller must NOT legacy-resend); retry semantics mirror legacy send()."""
         safe_error = _redact_telegram_error_text(exc)
         logger.warning("[%s] %s transient failure (no legacy resend): %s", self.name, what, safe_error)
-        return _maybe_delivered_result(exc, safe_error, retry_after=retry_after)
+        return rich_failure_result(exc, safe_error, retry_after=retry_after)
 
     def _send_retry_is_final(self, result: SendResult) -> bool:
         """A send that may already be in the chat is never retried or re-sent as plain text."""
@@ -1416,15 +1418,14 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
                 if _m:
                     _retry_after = float(_m.group(1))
             return self._rich_transient_result(exc, "sendRichMessage", retry_after=_retry_after)
-        if isinstance(msg, dict):
-            message_id = msg.get("message_id")
-            if message_id is None:
-                message_id = (msg.get("result") or {}).get("message_id")
-        else:
-            message_id = getattr(msg, "message_id", None)
-        if message_id is not None:
-            await self._record_rich_sent(chat_id, message_id, content)
-        return SendResult(success=True, message_id=str(message_id) if message_id is not None else None)
+        message_id = msg.get("message_id") if isinstance(msg, dict) else getattr(msg, "message_id", None)
+        if message_id is None and isinstance(msg, dict):
+            message_id = (msg.get("result") or {}).get("message_id")
+        if message_id is None:  # accepted with no id: delivery unknown, never proof of it (#147616)
+            from plugins.platforms.telegram.telegram_send_errors import idless_send_result
+            return idless_send_result(self.name, chat_id, "sendRichMessage")
+        await self._record_rich_sent(chat_id, message_id, content)
+        return SendResult(success=True, message_id=str(message_id))
 
     def _rich_payload_base(self, chat_id: str, content: str) -> dict[str, Any]:
         payload: dict[str, Any] = {"chat_id": normalize_telegram_chat_id(chat_id), "rich_message": self._rich_message_payload(content)}
@@ -6012,15 +6013,15 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
         if not self._is_user_authorized_from_message(msg):
             self._log_blocked_user(msg)
             return
-        if not self._gate_or_observe(msg, update, MessageType.LOCATION):
-            return
         venue = getattr(msg, "venue", None)
         location = getattr(venue, "location", None) if venue else getattr(msg, "location", None)
         if not location:
             return
-        lat = getattr(location, "latitude", None)
-        lon = getattr(location, "longitude", None)
-        if lat is None or lon is None:
+        lat, lon = getattr(location, "latitude", None), getattr(location, "longitude", None)
+        # Before the gate: a GPS tick in place is not new input, observed or not (#151333).
+        if lat is None or lon is None or is_redundant_live_refresh(self, msg, location, lat, lon):
+            return
+        if not self._gate_or_observe(msg, update, MessageType.LOCATION):
             return
         parts = ["[The user shared a location pin.]"]
         if venue:
@@ -6274,17 +6275,15 @@ class TelegramAdapter(TelegramContactMixin, TelegramHeldInboundMixin, TelegramRe
             if cached.kind == "audio":
                 event.message_type = MessageType.AUDIO
             logger.info("[Telegram] Cached user %s at %s (%s)", cached.kind, cached.path, cached.media_type)
-            # Inject text-readable content (≤100 KB). Gate on extension/MIME, NOT a blind UTF-8 decode:
-            # PDF/zip/docx have decodable ASCII headers. Binary files are surfaced as a cached path only.
+            # Inject text-readable content (≤100 KB); gate on extension/MIME, not a blind UTF-8 decode (PDF/zip/docx
+            # have ASCII headers). Text under a /command caption stays path-only: the command must lead to parse.
             MAX_TEXT_INJECT_BYTES = 100 * 1024
-            _is_text = ext in _TEXT_INJECT_EXTENSIONS or (doc_mime or "").startswith("text/")
+            _is_text = (ext in _TEXT_INJECT_EXTENSIONS or (doc_mime or "").startswith("text/")) and not caption_is_command(event.text)
             if _is_text and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                 try:
                     text_content = raw_bytes.decode("utf-8")
                     display_name = re.sub(r'[^\w.\- ]', '_', original_filename or f"document{ext or '.txt'}")
-                    injection = f"[Content of {display_name}]:\n{text_content}"
-                    event.text = f"{injection}\n\n{event.text}" if event.text else injection
-                    event.media_text_inlined = [True]
+                    inline_item_text(event, f"[Content of {display_name}]:\n{text_content}")
                 except UnicodeDecodeError:
                     pass  # binary — agent has the cached path
         except Exception as e:
