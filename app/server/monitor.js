@@ -144,12 +144,15 @@ _deployBuiltinSkills();
 // 2026-10-28 修的真缺陷：旧代码只在启动时写 status='running'，停止时没有任何人写 stopped，
 // 于是停用后应用中心永远显示「运行中」（用户以为「停不掉」）；进程其实已经退出了。
 function syncAppCenterStatus(status, _tries) {
-  const isStop = status === "running" ? "f" : "t";
+  // ⚠ 只写 status，绝对不要动 is_stop / is_uninstall：
+  // 这两列不是"运行状态"，而是「应用中心能力位」——is_stop=是否允许停止、is_uninstall=是否允许卸载。
+  // 2026-11-09 实测事故：同步时把 is_stop 写成 'f'，详情页「停用」下拉立刻消失
+  // （只剩打开/卸载），而同机 wildwork、hermes-studio 的 is_stop 恒为 't' 且都有「停用」。
   const tries = _tries || 3;
   for (let i = 0; i < tries; i++) {
     try {
       execSync(
-        `sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c "UPDATE app SET status='${status}', is_stop='${isStop}', is_non_manual_stop='f', updated_at=now() WHERE app_name='hermes-agent'" 2>&1`,
+        `sudo -n sudo -u postgres /usr/bin/psql -d appcenter -c "UPDATE app SET status='${status}', updated_at=now() WHERE app_name='hermes-agent'" 2>&1`,
         { timeout: 10000 }
       );
       log(`[appcenter] 状态已同步: status=${status}`);
