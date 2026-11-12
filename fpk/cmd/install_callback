@@ -707,7 +707,10 @@ fi
 # app 表的 is_stop / is_uninstall 决定详情页是否出现启停与卸载下拉；
 # 手工部署的应用这两列一直是 false，于是面板上永远只有一个「打开」按钮。
 # 安装/升级回调里补一次，保证重装后不会退化。
-_appctl_sql="UPDATE app SET is_stop='t', is_uninstall='t', updated_at=now() WHERE app_name='hermes-agent'"
+# service_url 必须一起补：应用中心靠它拿到「服务端口」来判断能否启停，
+# 空值会让详情页只剩「打开/卸载」、没有「停用」（2026-11-12 实测）。
+# 注意 \$ 转义：这个 SQL 在双引号里，不能让 bash 展开 ${host}。
+_appctl_sql="UPDATE app SET is_stop='t', is_uninstall='t', service_url='://\${host}:8742/', updated_at=now() WHERE app_name='hermes-agent'"
 if [ "$(id -u)" = "0" ]; then
     _appctl_ok=$(sudo -u postgres /usr/bin/psql -d appcenter -tAc "$_appctl_sql" 2>&1)
 else
