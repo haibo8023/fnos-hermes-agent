@@ -173,6 +173,34 @@ function syncAppCenterStatus(status, _tries) {
 }
 syncAppCenterStatus("running");
 
+// ── config.yaml 体积守卫（2026-11-13 事故）────────────────────────────────
+// 上游某处保存配置时把 command 反复转义，单行能膨胀到 256MB：
+// gateway/dashboard 启动时解析它 → CPU 100%、RSS 1GB+、端口永不监听，
+// 门户「打不开」而 app 表还写着 running（monitor 已先写了 running）。
+// 这里在拉起服务前检查体积：>5MB 就备份原文件 + 隔离超长行，保证应用还能起来。
+function guardHugeConfig() {
+  try {
+    const cfg = `${DATA_DIR}/config.yaml`;
+    if (!existsSync(cfg)) return;
+    const size = statSync(cfg).size;
+    if (size < 5 * 1024 * 1024) return;
+    log(`[config-guard] config.yaml 异常膨胀 ${(size / 1048576).toFixed(1)}MB，开始隔离超长行…`);
+    const content = readFileSync(cfg, "utf8");
+    let dropped = 0;
+    const fixed = content.split("\n").map((l) => {
+      if (l.length <= 1024 * 1024) return l;
+      dropped += 1;
+      return /^\s*command\s*:/.test(l) ? '    command: ""' : "    # [config-guard] 已移除超长行";
+    }).join("\n");
+    try { writeFileSync(`${cfg}.broken-${Date.now()}`, content); } catch (e) {}
+    writeFileSync(cfg, fixed);
+    log(`[config-guard] 已隔离 ${dropped} 条超长行；原文件备份为 config.yaml.broken-<ts>`);
+  } catch (e) {
+    log(`[config-guard] 修复失败: ${e?.message || e}`);
+  }
+}
+guardHugeConfig();
+
 // ── 状态看门狗（2026-11-09 事故）──────────────────────────────────────────
 // monitor 活着就等于应用在运行。但只要有一次状态同步失败（关机时序 / psql 短暂不可用），
 // app 表就会停在 start/stopped：应用中心随后拒绝创建启动任务（error 10332），
