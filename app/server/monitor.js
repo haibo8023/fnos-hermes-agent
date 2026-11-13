@@ -858,9 +858,10 @@ function _replaceTopLevelKey(raw, key, block) {
   return out.join("\n");
 }
 
-// 模块级自动注册：直接操作文件，不依赖 handleFetch 内部函数
-function _moduleParseMcpServers(yml) {
-  const out = {};
+// 模块级自动注册：只重建 conn-* 条目，用户自己的 MCP 配置必须逐字保留。
+// 旧实现把 YAML 标量的引号当成值，再 JSON.stringify 一次；每 180 秒重写都会让 command
+// 的引号/反斜杠翻倍，同时丢掉多行 args，最终把 config.yaml 膨胀到数百 MB。
+function _moduleMcpServerChunks(yml) {
   const s = String(yml || "");
   let block = "";
   const mTop = s.match(/^mcp_servers:\s*\n([\s\S]*?)(?=^[a-zA-Z_][a-zA-Z0-9_-]*:)/m);
@@ -869,16 +870,41 @@ function _moduleParseMcpServers(yml) {
     const mEnd = s.match(/^mcp_servers:\s*\n([\s\S]*)$/m);
     if (mEnd) block = mEnd[1];
   }
+  const chunks = [];
   let cur = null;
+  function flush() {
+    if (!cur) return;
+    const text = cur.lines.join("\n").replace(/\n+$/, "");
+    if (text.trim()) chunks.push({ name: cur.name, text });
+    cur = null;
+  }
   block.split("\n").forEach(l => {
     const km = l.match(/^  ([a-zA-Z0-9_\-]+):\s*$/);
-    if (km) { cur = km[1]; out[cur] = {}; return; }
-    if (cur && /^    \S/.test(l)) {
-      const vm = l.match(/^    (\S+):\s*(.*)$/);
-      if (vm) out[cur][vm[1]] = vm[2].trim();
+    if (km) {
+      flush();
+      cur = { name: km[1], lines: [l] };
+    } else if (cur) {
+      cur.lines.push(l);
     }
   });
-  return out;
+  flush();
+  return chunks;
+}
+function _moduleConnectorChunk(name, entry) {
+  const args = Array.isArray(entry.args) ? entry.args : [];
+  const cmd = String(entry.command || entry.command_cmd || "");
+  let text = "  " + name + ":\n    command: " + JSON.stringify(cmd);
+  if (args.length) {
+    text += "\n    args:\n" + args.map(a => "      - " + JSON.stringify(String(a))).join("\n");
+  }
+  return { name, text };
+}
+function _moduleBuildMcpConfigBlock(yml, connObj) {
+  const preserved = _moduleMcpServerChunks(yml).filter(c => !c.name.startsWith("conn-"));
+  const generated = Object.keys(connObj).map(name => _moduleConnectorChunk(name, connObj[name]));
+  const all = preserved.concat(generated);
+  if (all.length === 0) return "mcp_servers: {}";
+  return "mcp_servers:\n" + all.map(c => c.text).join("\n");
 }
 function _moduleLevelAutoRegisterMcp() {
   try {
@@ -894,35 +920,17 @@ function _moduleLevelAutoRegisterMcp() {
       if (!(cat.fields || []).every(function (f) { return !!creds[f.key]; })) return;
       connObj["conn-" + cat.kind] = { command: nodeBin, args: [MCP_BRIDGE_SCRIPT, cat.kind, String(UI_PORT)] };
     });
-    // 合并：保留现有非 conn-* 的 MCP 服务器（用户手动配置不被覆盖），conn-* 按凭证补齐
-    const merged = _moduleParseMcpServers(yml);
-    Object.keys(connObj).forEach(k => { merged[k] = connObj[k]; });
-    // 清理已无凭证的 conn-*（防止残留失效配置）
-    Object.keys(merged).forEach(k => {
-      if (k.startsWith("conn-") && !connObj[k]) delete merged[k];
-    });
-    const names = Object.keys(merged);
-    let block;
-    if (names.length === 0) {
-      block = "mcp_servers: {}";
-    } else {
-      block = "mcp_servers:\n" + names.map(function (n) {
-        const e = merged[n];
-        const cmd = e.command || e.command_cmd || "";
-        const args = Array.isArray(e.args) ? e.args : [];
-        let out = "  " + n + ":\n    command: " + JSON.stringify(cmd) + "\n";
-        if (args.length) out += "    args:\n" + args.map(a => "      - " + JSON.stringify(a)).join("\n") + "\n";
-        Object.keys(e).forEach(k2 => {
-          if (k2 === "command" || k2 === "args" || k2 === "command_cmd") return;
-          out += "    " + k2 + ": " + e[k2] + "\n";
-        });
-        return out.replace(/\n$/, "");
-      }).join("\n");
-    }
-    yml = _replaceTopLevelKey(yml, "mcp_servers", block);
-    try { writeFileSync(HERMES_CONFIG, yml, { mode: 0o644 }); } catch (e) {}
+    // 只增删/更新 conn-*；jsreverser 等用户条目的 command、args、env、注释原样保留。
+    const preservedCount = _moduleMcpServerChunks(yml).filter(c => !c.name.startsWith("conn-")).length;
+    const block = _moduleBuildMcpConfigBlock(yml, connObj);
+    const nextYml = _replaceTopLevelKey(yml, "mcp_servers", block);
+    // 没变化绝不写盘：既避免配置膨胀，也避免与 hermes 的正常配置保存互相覆盖。
+    if (nextYml === yml) return;
+    writeFileSync(HERMES_CONFIG, nextYml, { mode: 0o644 });
     const connCount = Object.keys(connObj).length;
-    if (connCount > 0) log(`[MCP-BRIDGE] auto-register: ${connCount} 个网关连接器已同步到 config.yaml（共 ${names.length} 个 MCP server）`);
+    if (connCount > 0) {
+      log(`[MCP-BRIDGE] auto-register: ${connCount} 个网关连接器已同步到 config.yaml（共 ${preservedCount + connCount} 个 MCP server）`);
+    }
   } catch (e) { log("[MCP-BRIDGE] module-level auto-register failed: " + e.message); }
 }
 // 定期自愈：mcp_servers 被外部写操作（hermes 保存配置等）抹掉/覆盖时自动补回，
