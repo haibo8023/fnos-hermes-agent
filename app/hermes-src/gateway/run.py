@@ -2278,10 +2278,10 @@ def _resolve_runtime_agent_kwargs() -> dict:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
     if fallback_entry is not None:
-        # The entry's model is the one this agent must send (#112600). Carry the fallback notice so the
-        # gateway can surface a user-visible provider switch (#74349); the caller must pop
-        # ``_fallback_notice`` before forwarding kwargs to AIAgent.
+        # The entry's model is what this agent sends (#112600); the caller pops the notice (#74349).
+        from agent.primary_auth_fallback import RUNTIME_KEY  # and the primary's failed login (#147212)
         return {**_runtime_agent_kwargs(runtime), "model": fallback_entry["model"],
+                RUNTIME_KEY: runtime.get(RUNTIME_KEY),
                 "_fallback_notice": pre_agent_fallback_notice(
                     _primary_provider, _primary_model,
                     runtime.get("provider") or fallback_entry.get("provider") or "unknown",
@@ -4146,40 +4146,9 @@ class GatewayRunner(
         return None
 
     def _resolve_profile_home_for_source(self, source: SessionSource) -> Path:
-        """Resolve which profile's HERMES_HOME serves this source: the pinned identity's runtime
-        home, else ``source.profile``, then ``_profile_name_for_source`` (sources bypassing
-        ``build_source``), then the active profile."""
-        from gateway.profile_routing import ProfileRouteRejected
-        from gateway.session_identity import identity_of
-        from hermes_cli.profiles import get_active_profile_name, get_profile_dir, profile_exists
-        from hermes_constants import get_hermes_home
-        identity = identity_of(source)
-        if identity is not None:
-            return identity.runtime_home
-        explicit_profile = None  # explicitly requested (source or routing) vs. default fallback
-        try:
-            name = (source.profile or "").strip() or self._profile_name_for_source(source)
-            explicit_profile = name or None
-            if not name:
-                name = get_active_profile_name() or "default"
-            profile_dir = get_profile_dir(name)
-            if explicit_profile and not profile_exists(name):
-                logger.warning(
-                    "Profile %r does not exist for source %s/%s (guild_id=%s), "
-                    "falling back to global HERMES_HOME",
-                    explicit_profile, source.platform.value, source.chat_id,
-                    getattr(source, "guild_id", None))
-                return get_hermes_home()
-            return profile_dir
-        except ProfileRouteRejected:
-            raise
-        except Exception:
-            logger.warning(
-                "Failed to resolve profile directory for source %s/%s (guild_id=%s), "
-                "falling back to global HERMES_HOME: %s",
-                source.platform.value, source.chat_id, getattr(source, "guild_id", None),
-                explicit_profile or "(no profile)", exc_info=True)
-            return get_hermes_home()
+        """Profile HERMES_HOME serving *source*; see ``gateway.run_profile_home``."""
+        from gateway.run_profile_home import resolve_profile_home_for_source
+        return resolve_profile_home_for_source(self, source)
 
     @dataclasses.dataclass
     class _RunAgentDisplay:
